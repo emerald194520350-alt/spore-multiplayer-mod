@@ -3,9 +3,18 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace CoopNet
 {
+    struct CellPose
+    {
+        float x = 0, y = 0, z = 0;
+        float qx = 0, qy = 0, qz = 0, qw = 1;
+        float scale = 1;
+        std::uint32_t animation = 0xAAAA0015;
+        bool visible = true;
+    };
     struct CellProgress
     {
         int food = 0;
@@ -23,12 +32,29 @@ namespace CoopNet
         bool firstEditorEntry = false;
     };
 
+    struct NpcState
+    {
+        std::uint32_t id = 0;
+        std::uint32_t cellResource = 0;
+        float x = 0, y = 0, z = 0;
+        float qz = 0, qw = 1;
+        float scale = 1;
+        float targetSize = 1;
+        float opacity = 1;
+        int stageScale = 0;
+        std::uint32_t modelInstance = 0, modelType = 0, modelGroup = 0;
+    };
+
     struct Snapshot
     {
         bool enabled = false;
         bool connected = false;
         std::uint64_t connectionGeneration = 0;
         std::string lastError;
+        // A TCP connection alone is not permission to spawn a player clone.
+        // This is set only when the session-state snapshot contains the other role.
+        bool remotePeerConnected = false;
+        std::uint64_t remotePeerGeneration = 0;
         bool hasRemotePosition = false;
         float remoteX = 0.0f;
         float remoteY = 0.0f;
@@ -43,13 +69,26 @@ namespace CoopNet
         float remoteScale = 1.0f;
         float remoteTargetSize = 1.0f;
         float remoteOpacity = 1.0f;
+        CellPose remotePose;
         std::uint64_t remoteAppearanceSequence = 0;
+        std::uint32_t remoteAppearanceModelInstance = 0;
+        std::uint32_t remoteAppearanceModelType = 0;
+        std::uint32_t remoteAppearanceModelGroup = 0;
         std::string remoteAppearanceBlob;
+        std::uint64_t npcSequence = 0;
+        std::uint64_t npcReceivedTick = 0;
+        std::vector<NpcState> remoteNpcs;
 
         bool invitePending = false;
         bool inviteAccepted = false;
+        // Role that owns the saved world behind the current invitation.
+        std::string inviteFrom;
+        std::uint64_t worldGeneration = 0;
+        // The host alone controls the shared simulation pause.
+        bool hostPaused = false;
 
         bool progressInitialized = false;
+        std::uint64_t progressAckSequence = 0;
         std::uint64_t revision = 0;
         CellProgress progress;
 
@@ -68,13 +107,15 @@ namespace CoopNet
     void SubmitPosition(float x, float y, float z,
         std::uint32_t modelInstance, std::uint32_t modelType,
         std::uint32_t modelGroup, std::uint32_t cellResource,
-        float scale, float targetSize, float opacity);
+        float scale, float targetSize, float opacity, const CellPose* pose = nullptr);
     void SubmitAppearance(std::uint32_t modelInstance, std::uint32_t modelType,
         std::uint32_t modelGroup, const std::string& appearanceBlob);
     void SubmitInvite();
     void SubmitInviteResponse(bool accepted);
+    void SubmitHostPause(bool paused);
+    void SubmitNpcSnapshot(const std::vector<NpcState>& npcs);
     void SeedProgress(const CellProgress& progress);
-    void SubmitProgressDelta(const CellProgress& delta,
+    void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
         const std::array<int, 13>& absoluteUnlocks);
     void SubmitEditorOpen(std::uint32_t editorID);
     void SubmitEditorClose(const std::string& speciesBlob);

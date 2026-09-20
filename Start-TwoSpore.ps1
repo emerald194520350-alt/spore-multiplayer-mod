@@ -1,4 +1,6 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$TraceMovement)
+if ($TraceMovement) { $env:SPORE_COOP_TRACE_MOVEMENT = '1' }
+$ErrorActionPreference = 'Stop'
 
 $primaryLauncher = 'C:\ProgramData\SPORE ModAPI Launcher Kit\Spore ModAPI Launcher.exe'
 $primaryLauncherRoot = 'C:\ProgramData\SPORE ModAPI Launcher Kit'
@@ -14,6 +16,27 @@ $primaryMod = 'C:\ProgramData\SPORE ModAPI Launcher Kit\mLibs\SporeCoop.Probe.dl
 $secondMod = 'C:\ProgramData\SPORE ModAPI Launcher Kit 2\mLibs\SporeCoop.Probe.dll'
 $primaryProfile = Join-Path $env:APPDATA 'Spore'
 $secondProfile = Join-Path $env:APPDATA 'SporeCoop2'
+$documentsPath = [Environment]::GetFolderPath('MyDocuments')
+$primaryCreations = Join-Path $documentsPath 'My Spore Creations'
+$secondCreations = Join-Path $documentsPath 'My Spore Creations Coop 2'
+
+# Refuse to mix a running DLL with an updated server or partially install DLLs.
+$runningGames = @(Get-Process -Name SporeApp -ErrorAction SilentlyContinue)
+if ($runningGames.Count -gt 0) {
+    $updatePending = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'SporeCoop.Server.next.exe')
+    if (Test-Path -LiteralPath $builtMod) {
+        $buildHash = (Get-FileHash -LiteralPath $builtMod -Algorithm SHA256).Hash
+        foreach ($installedMod in @($primaryMod, $secondMod)) {
+            if (-not (Test-Path -LiteralPath $installedMod) -or
+                (Get-FileHash -LiteralPath $installedMod -Algorithm SHA256).Hash -ne $buildHash) {
+                $updatePending = $true
+            }
+        }
+    }
+    if ($updatePending) {
+        throw 'Готова новая сборка. Закрой оба окна SPORE и запусти этот скрипт ещё раз: он обновит мод и сервер вместе.'
+    }
+}
 
 if (-not (Test-Path -LiteralPath $primaryLauncher)) {
     throw "Основной ModAPI Launcher не найден: $primaryLauncher"
@@ -82,9 +105,19 @@ if ($instances.Count -eq 0) {
         $primaryGames = Join-Path $primaryProfile 'Games'
         $secondGames = Join-Path $secondProfile 'Games'
         if (Test-Path -LiteralPath $primaryGames) {
-            if (-not (Test-Path -LiteralPath $secondGames)) {
-                New-Item -ItemType Directory -Path $secondGames -Force | Out-Null
+            $backupStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            # Copying into an existing Games directory leaves files belonging to
+            # the guest's old creature behind.  That produced a black local
+            # creature in one window and the host creature in the other. Keep a
+            # recoverable backup, then replace the isolated profile's Games
+            # directory as one complete world before either instance starts.
+            if (Test-Path -LiteralPath $secondGames) {
+                $backupGames = Join-Path $env:LOCALAPPDATA "SporeCoop\Backups\Launch-$backupStamp\SporeCoop2\Games"
+                New-Item -ItemType Directory -Path (Split-Path -Parent $backupGames) -Force | Out-Null
+                Copy-Item -LiteralPath $secondGames -Destination $backupGames -Recurse -Force
+                Remove-Item -LiteralPath $secondGames -Recurse -Force
             }
+            New-Item -ItemType Directory -Path $secondGames -Force | Out-Null
             Get-ChildItem -LiteralPath $primaryGames -Force | ForEach-Object {
                 Copy-Item -LiteralPath $_.FullName -Destination $secondGames -Recurse -Force
             }
@@ -94,6 +127,22 @@ if ($instances.Count -eq 0) {
             $source = Join-Path $primaryProfile $fileName
             if (Test-Path -LiteralPath $source) {
                 Copy-Item -LiteralPath $source -Destination (Join-Path $secondProfile $fileName) -Force
+            }
+        }
+
+        # A save references creature assets stored under Documents, not only
+        # files in AppData.  The second profile must receive that library too;
+        # otherwise SPORE resolves the same world to its previous local model.
+        if (Test-Path -LiteralPath $primaryCreations) {
+            if (Test-Path -LiteralPath $secondCreations) {
+                $creationBackup = Join-Path $env:LOCALAPPDATA "SporeCoop\Backups\Launch-$backupStamp\My Spore Creations Coop 2"
+                New-Item -ItemType Directory -Path (Split-Path -Parent $creationBackup) -Force | Out-Null
+                Copy-Item -LiteralPath $secondCreations -Destination $creationBackup -Recurse -Force
+                Remove-Item -LiteralPath $secondCreations -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $secondCreations -Force | Out-Null
+            Get-ChildItem -LiteralPath $primaryCreations -Force | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $secondCreations -Recurse -Force
             }
         }
         Write-Host 'Актуальный мир первого профиля скопирован во второй профиль.' -ForegroundColor Green

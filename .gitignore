@@ -15,6 +15,7 @@ vendor/**/obj/
 vendor/**/Debug/
 vendor/**/Release/
 SporeCoop.Server.exe
+SporeCoop.Server.next.exe
 
 # Local/user-specific backups
 SporeApp-AppCompat*.reg

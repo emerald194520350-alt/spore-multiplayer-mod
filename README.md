@@ -1,8 +1,8 @@
-# SporeCoop — Local Multiplayer Mod (Alpha 1)
+# spore multiplayer mod beta 1
 
 SporeCoop is an experimental local co-op mod for SPORE. It is designed to let two SPORE instances on the same PC share a game session, with a future LAN/Radmin VPN mode planned for remote players.
 
-The project is currently **Alpha 1**. It is a development and testing build, not a finished release. Crashes, visual differences, desynchronisation, and unsupported stages are still possible.
+The project is currently **Beta 1** (protocol 3). It is an experimental development and testing build, not a finished release. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes and installation.
 
 ## What the mod is for
 
@@ -18,7 +18,7 @@ Current experimental goals include:
 - running two isolated SPORE profiles and two ModAPI instances on one PC;
 - providing diagnostic console commands such as `coopStatus`, `coopSpawn`, and `coopJoin`.
 
-## Alpha 1 limitations
+## Beta 1 limitations
 
 This version has not been validated across every SPORE stage. The protocol and server are tested automatically, but the tests do not drive the SPORE game engine. Creature-stage transitions, tutorials, quests, editor transitions, and unusual save states may still cause crashes or incomplete synchronisation. Remote play over Radmin VPN/ZeroTier/Hamachi is prepared at the protocol level, but complete world transfer and reliable cross-machine testing are not finished.
 
@@ -44,12 +44,58 @@ The host loads a saved world and uses the pause menu's co-op invitation. The gue
 
 ## Testing
 
+### September 20 sync build (protocol 3)
+
+The invitation sender now owns appearance and size in either window. Native
+cells publish their simulation transform and visibility even when the renderer
+uses structure attachments. Identical local species do not need an extra hidden
+avatar proxy, and native clones no longer wait for an unrelated standalone bake.
+
+NPC snapshots include the selected model key as well as the cell resource, so a
+random-creature resource is not rerolled independently in the other window.
+The nearest 48 creatures are mirrored. Cell removal uses the game's complete
+cleanup function after validating the installed executable's native ABI; unknown
+executables disable network cell creation instead of freeing only the pool slot.
+
+Food gains are now separate, acknowledged increments for each player. Parts
+merge into a common inventory; unacknowledged local gains survive older incoming
+snapshots. This requires protocol 3 in both DLLs and the server.
+
+Close **both** running game windows, then run `Start-TwoSpore.ps1` (or the usual
+two-window shortcut). It installs the DLLs and any `SporeCoop.Server.next.exe`
+update together. Use `Start-TwoSpore.ps1 -TraceMovement` for per-window diagnostic
+logs. The launcher refuses an update while old game windows are still running.
+
+This build has passed automated native and server tests, but its final gameplay
+verification is pending. NPC health, combat outcomes, food objects and the full
+world simulation are not yet one authoritative shared simulation. Mirrored NPCs
+remain invulnerable in the joining window. LAN/Radmin play still requires matching
+assets and prepared saves on both machines.
+
 Run the protocol tests with:
 
 ```powershell
 .\Test-Server.ps1
+.\Test-Native.ps1
 node .\tests\native-source.test.mjs
 ```
+
+`Test-Native.ps1` builds a Win32 test executable with Visual Studio C++ tools.
+It exercises the native network message parser and visual-state decisions:
+signed SPORE pool handles, appearance/position identity, reconnects, owner-led
+size, and local opacity overrides. These checks do not run the game engine.
+
+For a Cell visual regression check, accept an invitation, move both players,
+grow by eating food, and edit the creature before returning to the world.
+Repeat with the other window sending the invitation. Both windows should show
+the owner's creature and size, with separate local and remote visuals. Closing
+the peer or entering the editor must restore any locally hidden original cell.
+Run `coopStatus` in each game's cheat console to write role, owner, cell handles,
+scale, target size, opacity and appearance readiness to `%TEMP%\SporeCoop.Probe.log`.
+
+The joining player's appearance is still a visual proxy: its underlying cell
+continues to own input and collision. Matching parts and colours does not yet
+guarantee matching collision or part abilities across different saved creatures.
 
 To rebuild the native probe DLL:
 

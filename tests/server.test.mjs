@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 2, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 3, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -124,6 +124,11 @@ async function failure(c, data, contains) {
 
 try {
   await start();
+  const legacy = await client();
+  const legacyReply = await legacy.request({ type: 'hello', protocol: 2, role: 'host', token: hostToken, fingerprint },
+    m => m.type === 'error');
+  check(legacyReply.type === 'error', 'Legacy DLLs cannot mix absolute progress with the new incremental protocol');
+  await legacy.closed;
   const invalid = await hello('host', 'wrong-token-that-is-still-long-enough');
   check(invalid.reply.type === 'error', 'Invalid token must be refused');
   await invalid.c.closed;
@@ -162,19 +167,62 @@ try {
   }, 'Stale appearance');
   await failure(guest, { type: 'position', sequence: 0, position: [0, 0, 0], ...appearance }, 'Stale position');
   await failure(guest, { type: 'position', sequence: 1, position: ['bad', 0, 0], ...appearance }, 'Invalid position');
+  await failure(guest, { type: 'position', sequence: 1, position: [88, 0, 0], ...appearance, opacity: 2 }, 'Invalid opacity');
+  const unchangedPeer = await host.request({ type: 'snapshot' }, m => m.type === 'state');
+  check(unchangedPeer.players.guest.position[0] === -10 && unchangedPeer.players.guest.sequence === 0,
+    'A rejected position leaves both coordinates and sequence unchanged');
+  await guest.request({ type: 'position', sequence: 1, position: [-12, 0, 0], ...appearance }, m => m.type === 'position' && m.role === 'guest');
+  await failure(host, { type: 'appearance', sequence: 1, modelInstance: 123, modelType: 0x2b978c46, modelGroup: -1, appearance: fullAppearance }, 'Invalid modelGroup');
+  await host.request({ type: 'appearance', sequence: 1, modelInstance: 123, modelType: 0x2b978c46, modelGroup: 0, appearance: fullAppearance }, m => m.type === 'appearance' && m.sequence === 1);
+  check(true, 'Rejected appearance does not consume its sequence');
+  await failure(guest, { type: 'editorOpen', editorId: 12345 }, 'Invitation must be accepted');
 
   state = await host.request({ type: 'invite' }, stateMessage(state.revision + 1));
   const invitation = await guest.wait(stateMessage(state.revision));
   check(state.invitePending && invitation.invitePending && !state.inviteAccepted,
     'Host invitation is shown to the guest');
+  await failure(guest, { type: 'invite' }, 'already');
   state = await guest.request({ type: 'inviteResponse', accepted: true },
     stateMessage(state.revision + 1));
   const acceptedInvite = await host.wait(stateMessage(state.revision));
   check(state.inviteAccepted && acceptedInvite.inviteAccepted && !state.invitePending,
     'Accepted invitation unlocks automatic world joining');
+  const npcFrame = [
+    0x80000001, 123456, 12, 34, 0, 0, 1, 0.55, 0.55, 1, 0, 0xfedcba98, 0x2b978c46, 0,
+    0x80000002, 654321, 18, 35, 0, 0.7071067, 0.7071067, 0.8, 0.8, 1, 1, 789, 0x2b978c46, 0
+  ];
+  const relayedNpcs = await host.request({ type: 'npcSnapshot', sequence: 0, npcs: npcFrame },
+    m => m.type === 'npcSnapshot' && m.role === 'host');
+  const guestNpcs = await guest.wait(m => m.type === 'npcSnapshot' && m.role === 'host');
+  check(relayedNpcs.npcs.length === 28 && guestNpcs.npcs[15] === 654321 &&
+    guestNpcs.npcs[11] === 0xfedcba98,
+    'World-owner NPC creatures are relayed as one bounded authoritative frame');
+  await failure(guest, { type: 'npcSnapshot', sequence: 0, npcs: npcFrame },
+    'World owner authority');
+  await failure(host, { type: 'npcSnapshot', sequence: 1, npcs: [1, 2, 3] },
+    'Invalid npcs');
+  await failure(host, { type: 'npcSnapshot', sequence: 0, npcs: npcFrame }, 'Stale NPC');
+  await failure(host, { type: 'npcSnapshot', sequence: 1, npcs: [...npcFrame.slice(0, 14), ...npcFrame.slice(0, 14)] }, 'Invalid npcs');
+  const emptyNpcs = await host.request({ type: 'npcSnapshot', sequence: 1, npcs: [] }, m => m.type === 'npcSnapshot' && m.sequence === 1);
+  check(emptyNpcs.npcs.length === 0, 'An empty authoritative population removes departed NPCs');
+  state = await host.request({ type: 'hostPause', paused: true }, stateMessage(state.revision + 1));
+  const pausedGuest = await guest.wait(stateMessage(state.revision));
+  check(state.hostPaused && pausedGuest.hostPaused,
+    'Only the host can set a shared gameplay pause');
+  await failure(guest, { type: 'hostPause', paused: false }, 'World owner authority');
+  const samePause = await host.request({ type: 'hostPause', paused: true }, m => m.type === 'state');
+  check(samePause.revision === state.revision, 'Duplicate pause does not create a new revision');
+  state = await host.request({ type: 'hostPause', paused: false }, stateMessage(state.revision + 1));
+  const resumedGuest = await guest.wait(stateMessage(state.revision));
+  check(!state.hostPaused && !resumedGuest.hostPaused,
+    'Host resume releases the shared gameplay pause for both players');
 
   const seedUnlocks = Array(13).fill(0);
   seedUnlocks[2] = 1;
+  await failure(host, { type: 'seedProgress', food: 999, plantFood: 'broken' }, 'Invalid plantFood');
+  const rejectedSeed = await host.request({ type: 'snapshot' }, m => m.type === 'state');
+  check(rejectedSeed.food === 0 && !rejectedSeed.progressInitialized && rejectedSeed.revision === state.revision,
+    'Failed progress validation rolls back all partially assigned session fields');
   state = await host.request({
     type: 'seedProgress', food: 10, plantFood: 6, overPlantFood: 2,
     overAnimalFood: 1, spent: 3, unlocks: seedUnlocks, missions: missions(),
@@ -191,8 +239,8 @@ try {
   deltaUnlocks[2] = 2;
   deltaUnlocks[7] = 1;
   state = await guest.request({
-    type: 'progressDelta', eventId: 'progress-1', food: 14, plantFood: 7,
-    overPlantFood: 2, overAnimalFood: 4, spent: -1, unlocks: deltaUnlocks,
+    type: 'progressDelta', sequence: 1, eventId: 'progress-1', food: 4, plantFood: 1,
+    overPlantFood: 0, overAnimalFood: 3, spent: -1, unlocks: deltaUnlocks,
     missions: Object.assign(missions(), { 0: 1, 1: 2 }), killCount: 1,
     playerHasMoved: true, playerHasEaten: true,
     partCinematicPlayed: true, showMateButton: true, firstEditorEntry: true
@@ -203,11 +251,13 @@ try {
     'Either player can add shared progress or refund shared points');
   check(state.progress.unlocks[2] === 2 && state.progress.unlocks[7] === 1,
     'Unlocked parts merge into one shared inventory');
+  check(state.guestProgressSequence === 1 && state.hostProgressSequence === 0,
+    'Progress snapshots acknowledge only the contributing player');
   check(state.progress.partCinematicPlayed && state.progress.showMateButton &&
     state.progress.firstEditorEntry,
     'Cell tutorial cinematics, mate prompt, and first editor entry are shared');
   await failure(guest, {
-    type: 'progressDelta', eventId: 'progress-1', food: 1, plantFood: 0,
+    type: 'progressDelta', sequence: 1, eventId: 'progress-1', food: 1, plantFood: 0,
     overPlantFood: 0, overAnimalFood: 0, spent: 0, unlocks: deltaUnlocks,
     missions: missions(), killCount: 0, playerHasMoved: false, playerHasEaten: false,
     partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false
@@ -306,6 +356,60 @@ try {
     loaded.progress.spent === 2 && loaded.progress.unlocks[7] === 1,
     'Server restart restores shared progress and parts');
   await failure(restored, { type: 'award', revision: loaded.revision, eventId: 'food-1', amount: 50 }, 'Duplicate');
+  const { c: reverseGuest } = await hello('guest');
+  await restored.wait(m => m.type === 'state' && m.players.host && m.players.guest);
+  state = await reverseGuest.request({ type: 'invite' }, stateMessage(loaded.revision + 1));
+  const reversePending = await restored.wait(stateMessage(state.revision));
+  check(state.invitePending && reversePending.inviteFrom === 'guest' && !state.progressInitialized,
+    'Either window can invite the other and selects its own saved world');
+  state = await restored.request({ type: 'inviteResponse', accepted: true }, stateMessage(state.revision + 1));
+  const reverseAccepted = await reverseGuest.wait(stateMessage(state.revision));
+  check(state.inviteAccepted && state.inviteFrom === 'guest' && reverseAccepted.inviteFrom === 'guest',
+    'The other window can accept a guest-originated invitation');
+  state = await reverseGuest.request({ type: 'hostPause', paused: true }, stateMessage(state.revision + 1));
+  check(state.hostPaused, 'Second-window world owner can pause');
+  await failure(restored, { type: 'hostPause', paused: false }, 'World owner authority');
+  state = await reverseGuest.request({ type: 'hostPause', paused: false }, stateMessage(state.revision + 1));
+  check(!state.hostPaused, 'Second-window world owner can resume');
+  await failure(restored, {
+    type: 'seedProgress', food: 1, plantFood: 0, overPlantFood: 0, overAnimalFood: 0,
+    spent: 0, unlocks: Array(13).fill(0), missions: missions(), killCount: 0,
+    playerHasMoved: false, playerHasEaten: false,
+    partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false
+  }, 'World owner authority');
+  state = await reverseGuest.request({
+    type: 'seedProgress', food: 9, plantFood: 3, overPlantFood: 0, overAnimalFood: 0,
+    spent: 0, unlocks: Array(13).fill(0), missions: missions(), killCount: 0,
+    playerHasMoved: true, playerHasEaten: true,
+    partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false
+  }, stateMessage(state.revision + 1));
+  check(state.progressInitialized && state.progress.food === 9,
+    'The inviter, not the fixed host role, seeds the shared cell campaign');
+  check(state.worldGeneration > invitation.worldGeneration &&
+    state.hostProgressSequence === 0 && state.guestProgressSequence === 0,
+    'A new world starts a fresh inventory acknowledgement generation');
+  // Two independent pickups made from the same baseline must both survive.
+  const connected = { host: restored, guest: reverseGuest };
+  const gain = (eventId, slot) => ({ type: 'progressDelta', sequence: 1, eventId,
+    food: 1, plantFood: 0, overPlantFood: 0, overAnimalFood: 0, spent: 0,
+    unlocks: Array.from({ length: 13 }, (_, i) => i === slot ? 1 : 0),
+    missions: missions(), killCount: 0, playerHasMoved: true, playerHasEaten: true,
+    partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false });
+  if (!state.inviteAccepted) {
+    state = await restored.request({ type: 'inviteResponse', accepted: true }, stateMessage(state.revision + 1));
+  }
+  const beforeConcurrent = state.revision;
+  connected.host.send(gain('simultaneous-host', 3));
+  connected.guest.send(gain('simultaneous-guest', 5));
+  state = await connected.host.wait(stateMessage(beforeConcurrent + 2));
+  check(state.food === 11 && state.unlocks[3] === 1 && state.unlocks[5] === 1,
+    'Concurrent pickups from both players add food and preserve both unlocked parts');
+  check(state.hostProgressSequence === 1 && state.guestProgressSequence === 1,
+    'Each contributor receives a separate acknowledgement');
+  await failure(connected.host, { ...gain('out-of-order', 8), sequence: 3 }, 'Out of order');
+  const afterRejected = await connected.host.request({ type: 'snapshot' }, m => m.type === 'state');
+  check(afterRejected.food === 11 && afterRejected.unlocks[8] === 0 && afterRejected.hostProgressSequence === 1,
+    'Rejected progress changes neither inventory nor acknowledgements');
   console.log('PASS: ' + checks + ' protocol assertions. No gameplay was tested. Artifacts: ' + temp);
 } catch (error) {
   console.error('Failed after ' + checks + ' assertions. Server log:\n' + logs);

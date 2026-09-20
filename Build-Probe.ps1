@@ -17,4 +17,4 @@ if (-not (Test-Path -LiteralPath (Join-Path $LauncherRoot 'coreLibs\SporeModAPI.
 if ($LASTEXITCODE -ne 0) { throw 'SDK static library build failed.' }
 & $environment.MSBuildWithCpp (Join-Path $PSScriptRoot 'native\SporeCoop.Probe.vcxproj') /nologo /m /p:Configuration=Release /p:Platform=Win32 "/p:SdkRoot=$SdkRoot" "/p:LauncherRoot=$LauncherRoot"
 if ($LASTEXITCODE -ne 0) { throw 'Native probe build failed.' }
-Write-Output 'Built bin\SporeCoop.Probe.dll. This is an experimental NPC probe, not the full game adapter.'
+Write-Output 'Built bin\SporeCoop.Probe.dll. Close both SPORE windows and run Start-TwoSpore.ps1 to install it.'

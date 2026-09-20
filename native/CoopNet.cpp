@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 2;
+    constexpr int kProtocol = 3;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -39,6 +39,7 @@ namespace
     std::uint64_t gPositionSequence = 0;
     std::uint64_t gEventSequence = 0;
     std::uint64_t gSpeciesSequence = 1;
+    std::uint64_t gNpcSequence = 0;
 
     std::string Environment(const char* name)
     {
@@ -81,7 +82,20 @@ namespace
     void Queue(std::string message)
     {
         std::lock_guard<std::mutex> lock(gMutex);
-        if (gOutgoing.size() >= 256) gOutgoing.pop_front();
+        // Movement/population snapshots supersede older ones. Inventory and
+        // invitation events must never be silently evicted by movement traffic.
+        const char* realtime = message.rfind("{\"type\":\"position\"", 0) == 0 ? "{\"type\":\"position\"" :
+            message.rfind("{\"type\":\"npcSnapshot\"", 0) == 0 ? "{\"type\":\"npcSnapshot\"" : nullptr;
+        if (realtime)
+            for (auto it = gOutgoing.begin(); it != gOutgoing.end();)
+                if (it->rfind(realtime, 0) == 0) it = gOutgoing.erase(it); else ++it;
+        if (gOutgoing.size() >= 256)
+        {
+            gSnapshot.lastError = "Outgoing reliable queue overflow; reconnect required";
+            const SOCKET socket = gSocket.load();
+            if (socket != INVALID_SOCKET) shutdown(socket, SD_BOTH);
+            return;
+        }
         gOutgoing.push_back(std::move(message));
     }
 
@@ -209,6 +223,7 @@ namespace
 
     void ClearRemotePeerStateLocked()
     {
+        gSnapshot.remotePeerConnected = false;
         gSnapshot.hasRemotePosition = false;
         gSnapshot.remoteX = 0.0f;
         gSnapshot.remoteY = 0.0f;
@@ -223,8 +238,15 @@ namespace
         gSnapshot.remoteScale = 1.0f;
         gSnapshot.remoteTargetSize = 1.0f;
         gSnapshot.remoteOpacity = 1.0f;
+        gSnapshot.remotePose = CoopNet::CellPose{};
         gSnapshot.remoteAppearanceSequence = 0;
+        gSnapshot.remoteAppearanceModelInstance = 0;
+        gSnapshot.remoteAppearanceModelType = 0;
+        gSnapshot.remoteAppearanceModelGroup = 0;
         gSnapshot.remoteAppearanceBlob.clear();
+        gSnapshot.npcSequence = 0;
+        gSnapshot.npcReceivedTick = 0;
+        gSnapshot.remoteNpcs.clear();
     }
 
     bool ReadNumberArray(const std::string& json, const char* key,
@@ -241,7 +263,7 @@ namespace
                     json[position] == '\r' || json[position] == '\n')) ++position;
             if (position < json.size() && json[position] == ']')
             {
-                if (result.size() != expected) return false;
+                if (expected && result.size() != expected) return false;
                 values = std::move(result);
                 return true;
             }
@@ -251,6 +273,7 @@ namespace
             if (end == json.c_str() + position || errno == ERANGE || !std::isfinite(number))
                 return false;
             result.push_back(number);
+            if (result.size() > 48 * 14) return false;
             position = static_cast<size_t>(end - json.c_str());
             while (position < json.size() && json[position] == ' ') ++position;
             if (position < json.size() && json[position] == ',') { ++position; continue; }
@@ -274,7 +297,11 @@ namespace
             ClearRemotePeerStateLocked();
             gSnapshot.invitePending = false;
             gSnapshot.inviteAccepted = false;
+            gSnapshot.inviteFrom.clear();
+            gSnapshot.worldGeneration = 0;
+            gSnapshot.hostPaused = false;
             gSnapshot.progressInitialized = false;
+            gSnapshot.progressAckSequence = 0;
             gSnapshot.revision = 0;
             gSnapshot.progress = CoopNet::CellProgress{};
             gSnapshot.editorOpen = false;
@@ -301,8 +328,43 @@ namespace
             double sequence = 0;
             if (!ReadString(json, "role", role) || role == gRole ||
                 !ReadNumber(json, "sequence", sequence) ||
+                sequence < 0 || sequence >= 9223372036854775808.0 || std::floor(sequence) != sequence ||
                 !ReadNumberArray(json, "position", position, 3)) return;
+            CoopNet::CellPose pose;
+            pose.x = float(position[0]); pose.y = float(position[1]); pose.z = float(position[2]);
+            double poseValue = 0;
+            if (ReadNumber(json, "scale", poseValue)) pose.scale = float(poseValue);
+            std::vector<double> renderPosition, orientation;
+            size_t fieldStart = 0;
+            if (FindValueStart(json, "renderPosition", fieldStart))
+            {
+                if (!ReadNumberArray(json, "renderPosition", renderPosition, 3)) return;
+                for (const auto component : renderPosition) if (std::abs(component) > 1000000) return;
+                pose.x = float(renderPosition[0]); pose.y = float(renderPosition[1]); pose.z = float(renderPosition[2]);
+            }
+            if (FindValueStart(json, "orientation", fieldStart))
+            {
+                if (!ReadNumberArray(json, "orientation", orientation, 4)) return;
+                double norm = 0;
+                for (const auto component : orientation) norm += component * component;
+                if (norm < 0.99 || norm > 1.01) return;
+                pose.qx = float(orientation[0]); pose.qy = float(orientation[1]);
+                pose.qz = float(orientation[2]); pose.qw = float(orientation[3]);
+            }
+            if (FindValueStart(json, "renderScale", fieldStart))
+            {
+                if (!ReadNumber(json, "renderScale", poseValue) || poseValue < 0.001 || poseValue > 100000) return;
+                pose.scale = float(poseValue);
+            }
+            if (FindValueStart(json, "animation", fieldStart))
+            {
+                if (!ReadNumber(json, "animation", poseValue) || poseValue < 0 || poseValue > UINT32_MAX ||
+                    std::floor(poseValue) != poseValue) return;
+                pose.animation = std::uint32_t(poseValue);
+            }
+            if (FindValueStart(json, "visible", fieldStart) && !ReadBool(json, "visible", pose.visible)) return;
             std::lock_guard<std::mutex> lock(gMutex);
+            if (gSnapshot.hasRemotePosition && std::uint64_t(sequence) <= gSnapshot.remotePositionSequence) return;
             gSnapshot.hasRemotePosition = true;
             gSnapshot.remoteX = static_cast<float>(position[0]);
             gSnapshot.remoteY = static_cast<float>(position[1]);
@@ -317,7 +379,7 @@ namespace
             if (ReadNumber(json, "scale", value)) gSnapshot.remoteScale = static_cast<float>(value);
             if (ReadNumber(json, "targetSize", value)) gSnapshot.remoteTargetSize = static_cast<float>(value);
             if (ReadNumber(json, "opacity", value)) gSnapshot.remoteOpacity = static_cast<float>(value);
-            gSnapshot.hasRemoteAppearance = gSnapshot.remoteModelInstance != 0;
+            gSnapshot.remotePose = pose;
             return;
         }
 
@@ -331,17 +393,77 @@ namespace
                 !ReadString(json, "appearance", appearance) ||
                 !ReadNumber(json, "sequence", sequence)) return;
             std::lock_guard<std::mutex> lock(gMutex);
-            if (static_cast<std::uint64_t>(sequence) < gSnapshot.remoteAppearanceSequence)
+            if (gSnapshot.hasRemoteAppearance &&
+                static_cast<std::uint64_t>(sequence) <= gSnapshot.remoteAppearanceSequence)
                 return;
             gSnapshot.remoteAppearanceSequence = static_cast<std::uint64_t>(sequence);
             gSnapshot.remoteAppearanceBlob = std::move(appearance);
             if (ReadNumber(json, "modelInstance", value))
-                gSnapshot.remoteModelInstance = static_cast<std::uint32_t>(value);
+                gSnapshot.remoteAppearanceModelInstance = static_cast<std::uint32_t>(value);
             if (ReadNumber(json, "modelType", value))
-                gSnapshot.remoteModelType = static_cast<std::uint32_t>(value);
+                gSnapshot.remoteAppearanceModelType = static_cast<std::uint32_t>(value);
             if (ReadNumber(json, "modelGroup", value))
-                gSnapshot.remoteModelGroup = static_cast<std::uint32_t>(value);
-            gSnapshot.hasRemoteAppearance = gSnapshot.remoteModelInstance != 0;
+                gSnapshot.remoteAppearanceModelGroup = static_cast<std::uint32_t>(value);
+            gSnapshot.hasRemoteAppearance = gSnapshot.remoteAppearanceModelInstance != 0;
+            return;
+        }
+
+        if (type == "npcSnapshot")
+        {
+            std::string role;
+            double sequence = 0;
+            std::vector<double> values;
+            if (!ReadString(json, "role", role) || role == gRole ||
+                !ReadNumber(json, "sequence", sequence) || sequence < 0 ||
+                sequence >= 9223372036854775808.0 || std::floor(sequence) != sequence ||
+                !ReadNumberArray(json, "npcs", values, 0) || values.size() % 14 != 0)
+                return;
+            std::vector<CoopNet::NpcState> npcs;
+            npcs.reserve(values.size() / 14);
+            std::vector<std::uint32_t> ids;
+            for (size_t i = 0; i < values.size(); i += 14)
+            {
+                if (values[i] < 0 || values[i] > UINT32_MAX || std::floor(values[i]) != values[i] ||
+                    values[i + 1] <= 0 || values[i + 1] > UINT32_MAX || std::floor(values[i + 1]) != values[i + 1] ||
+                    std::abs(values[i + 2]) > 1000000 || std::abs(values[i + 3]) > 1000000 ||
+                    std::abs(values[i + 4]) > 1000000 || values[i + 7] < 0.001 ||
+                    values[i + 7] > 100000 || values[i + 8] < 0.001 ||
+                    values[i + 8] > 100000 || values[i + 9] < 0 || values[i + 9] > 1 ||
+                    values[i + 10] < -1 || values[i + 10] > 19 ||
+                    std::floor(values[i + 10]) != values[i + 10]) return;
+                const double orientationNorm = values[i + 5] * values[i + 5] +
+                    values[i + 6] * values[i + 6];
+                if (orientationNorm < 0.99 || orientationNorm > 1.01) return;
+                for (size_t field = 11; field < 14; ++field)
+                    if (values[i + field] < 0 || values[i + field] > UINT32_MAX ||
+                        std::floor(values[i + field]) != values[i + field]) return;
+                if (values[i + 11] == 0) return;
+                const auto id = static_cast<std::uint32_t>(values[i]);
+                if (std::find(ids.begin(), ids.end(), id) != ids.end()) return;
+                ids.push_back(id);
+                CoopNet::NpcState npc;
+                npc.id = static_cast<std::uint32_t>(values[i]);
+                npc.cellResource = static_cast<std::uint32_t>(values[i + 1]);
+                npc.x = static_cast<float>(values[i + 2]);
+                npc.y = static_cast<float>(values[i + 3]);
+                npc.z = static_cast<float>(values[i + 4]);
+                npc.qz = static_cast<float>(values[i + 5]);
+                npc.qw = static_cast<float>(values[i + 6]);
+                npc.scale = static_cast<float>(values[i + 7]);
+                npc.targetSize = static_cast<float>(values[i + 8]);
+                npc.opacity = static_cast<float>(values[i + 9]);
+                npc.stageScale = static_cast<int>(values[i + 10]);
+                npc.modelInstance = static_cast<std::uint32_t>(values[i + 11]);
+                npc.modelType = static_cast<std::uint32_t>(values[i + 12]);
+                npc.modelGroup = static_cast<std::uint32_t>(values[i + 13]);
+                npcs.push_back(npc);
+            }
+            std::lock_guard<std::mutex> lock(gMutex);
+            if (static_cast<std::uint64_t>(sequence) <= gSnapshot.npcSequence &&
+                gSnapshot.npcReceivedTick != 0) return;
+            gSnapshot.npcSequence = static_cast<std::uint64_t>(sequence);
+            gSnapshot.npcReceivedTick = GetTickCount64();
+            gSnapshot.remoteNpcs = std::move(npcs);
             return;
         }
 
@@ -352,11 +474,11 @@ namespace
             CoopNet::CellProgress progress;
             std::vector<double> unlocks;
             ReadBool(json, "progressInitialized", initialized);
-            if (ReadNumber(json, "revision", number))
-            {
-                std::lock_guard<std::mutex> lock(gMutex);
-                gSnapshot.revision = static_cast<std::uint64_t>(number);
-            }
+            std::uint64_t revision = 0;
+            if (ReadNumber(json, "revision", number)) revision = static_cast<std::uint64_t>(number);
+            std::uint64_t acknowledged = 0;
+            if (ReadNumber(json, gRole == "host" ? "hostProgressSequence" : "guestProgressSequence", number))
+                acknowledged = static_cast<std::uint64_t>(number);
             if (ReadNumber(json, "food", number)) progress.food = static_cast<int>(number);
             if (ReadNumber(json, "plantFood", number)) progress.plantFood = static_cast<int>(number);
             if (ReadNumber(json, "overPlantFood", number)) progress.overPlantFood = static_cast<int>(number);
@@ -380,6 +502,12 @@ namespace
             bool inviteAccepted = false;
             ReadBool(json, "invitePending", invitePending);
             ReadBool(json, "inviteAccepted", inviteAccepted);
+            bool hostPaused = false;
+            ReadBool(json, "hostPaused", hostPaused);
+            std::string inviteFrom;
+            ReadString(json, "inviteFrom", inviteFrom);
+            std::uint64_t worldGeneration = 0;
+            if (ReadNumber(json, "worldGeneration", number)) worldGeneration = static_cast<std::uint64_t>(number);
             std::string editorRole;
             ReadString(json, "editor", editorRole);
             std::uint32_t editorID = 0;
@@ -396,11 +524,23 @@ namespace
 
             std::lock_guard<std::mutex> lock(gMutex);
             if (hasPlayers && !remotePeerPresent) ClearRemotePeerStateLocked();
+            else if (hasPlayers)
+            {
+                if (!gSnapshot.remotePeerConnected) ++gSnapshot.remotePeerGeneration;
+                gSnapshot.remotePeerConnected = true;
+            }
             gSnapshot.progressInitialized = initialized;
+            // Revision, acknowledgement and progress must become visible in
+            // one mutex transaction. A mixed snapshot can lose local events.
+            gSnapshot.revision = revision;
+            gSnapshot.progressAckSequence = acknowledged;
             if (initialized) gSnapshot.progress = progress;
             gSnapshot.editorOpen = evolving;
             gSnapshot.invitePending = invitePending;
             gSnapshot.inviteAccepted = inviteAccepted;
+            gSnapshot.inviteFrom = inviteFrom;
+            gSnapshot.worldGeneration = worldGeneration;
+            gSnapshot.hostPaused = hostPaused;
             gSnapshot.editorRole = editorRole;
             gSnapshot.editorID = editorID;
             if (!species.empty() && speciesSequence >= gSnapshot.speciesSequence)
@@ -446,6 +586,7 @@ namespace
         std::deque<std::string> messages;
         {
             std::lock_guard<std::mutex> lock(gMutex);
+            if (!gSnapshot.connected) return true;
             messages.swap(gOutgoing);
         }
         for (const auto& message : messages)
@@ -457,13 +598,15 @@ namespace
     {
         std::lock_guard<std::mutex> lock(gMutex);
         gSnapshot.connected = false;
-        gSnapshot.hasRemotePosition = false;
-        gSnapshot.remotePositionReceivedTick = 0;
-        gSnapshot.hasRemoteAppearance = false;
-        gSnapshot.remoteAppearanceSequence = 0;
-        gSnapshot.remoteAppearanceBlob.clear();
+        ClearRemotePeerStateLocked();
+        gOutgoing.clear();
         gSnapshot.invitePending = false;
         gSnapshot.inviteAccepted = false;
+        gSnapshot.inviteFrom.clear();
+        gSnapshot.hostPaused = false;
+        gSnapshot.editorOpen = false;
+        gSnapshot.editorID = 0;
+        gSnapshot.editorRole.clear();
     }
 
     bool ConnectedLoop(SOCKET socket)
@@ -480,9 +623,18 @@ namespace
 
         std::vector<unsigned char> input;
         input.reserve(65536);
+        ULONG64 lastHeartbeat = GetTickCount64();
         while (!gStop.load())
         {
             if (!DrainMessages(socket)) return false;
+            // Menus, pauses and loading screens do not submit movement. Keep
+            // the session alive independently of the game's update callback.
+            const ULONG64 now = GetTickCount64();
+            if (now - lastHeartbeat >= 4000)
+            {
+                if (!SendFrame(socket, "{\"type\":\"ping\"}")) return false;
+                lastHeartbeat = now;
+            }
 
             fd_set readSet;
             FD_ZERO(&readSet);
@@ -660,7 +812,7 @@ namespace CoopNet
     void SubmitPosition(float x, float y, float z,
         std::uint32_t modelInstance, std::uint32_t modelType,
         std::uint32_t modelGroup, std::uint32_t cellResource,
-        float scale, float targetSize, float opacity)
+        float scale, float targetSize, float opacity, const CellPose* pose)
     {
         char json[640]{};
         sprintf_s(json,
@@ -669,7 +821,16 @@ namespace CoopNet
             "\"scale\":%.6f,\"targetSize\":%.6f,\"opacity\":%.6f}",
             static_cast<unsigned long long>(gPositionSequence++), x, y, z,
             modelInstance, modelType, modelGroup, cellResource, scale, targetSize, opacity);
-        Queue(json);
+        std::string packet(json);
+        if (pose)
+        {
+            char render[512]{};
+            sprintf_s(render, ",\"renderPosition\":[%.6f,%.6f,%.6f],\"orientation\":[%.6f,%.6f,%.6f,%.6f],\"renderScale\":%.6f,\"animation\":%u,\"visible\":%s}",
+                pose->x, pose->y, pose->z, pose->qx, pose->qy, pose->qz, pose->qw,
+                pose->scale, pose->animation, pose->visible ? "true" : "false");
+            packet.pop_back(); packet += render;
+        }
+        Queue(std::move(packet));
     }
 
     void SubmitAppearance(std::uint32_t modelInstance, std::uint32_t modelType,
@@ -694,15 +855,41 @@ namespace CoopNet
             (accepted ? "true}" : "false}"));
     }
 
+    void SubmitHostPause(bool paused)
+    {
+        Queue(std::string("{\"type\":\"hostPause\",\"paused\":") +
+            (paused ? "true}" : "false}"));
+    }
+
+    void SubmitNpcSnapshot(const std::vector<NpcState>& npcs)
+    {
+        std::string packet = "{\"type\":\"npcSnapshot\",\"sequence\":" +
+            std::to_string(gNpcSequence++) + ",\"npcs\":[";
+        bool first = true;
+        for (const auto& npc : npcs)
+        {
+            char item[384]{};
+            sprintf_s(item, "%s%u,%u,%.6f,%.6f,%.6f,%.7f,%.7f,%.6f,%.6f,%.6f,%d,%u,%u,%u",
+                first ? "" : ",", npc.id, npc.cellResource,
+                npc.x, npc.y, npc.z, npc.qz, npc.qw, npc.scale,
+                npc.targetSize, npc.opacity, npc.stageScale,
+                npc.modelInstance, npc.modelType, npc.modelGroup);
+            packet += item;
+            first = false;
+        }
+        packet += "]}";
+        Queue(std::move(packet));
+    }
+
     void SeedProgress(const CellProgress& progress)
     {
         Queue("{\"type\":\"seedProgress\"," + ProgressFields(progress, progress.unlocks, false) + "}");
     }
 
-    void SubmitProgressDelta(const CellProgress& delta,
+    void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
         const std::array<int, 13>& absoluteUnlocks)
     {
-        Queue("{\"type\":\"progressDelta\",\"eventId\":\"" +
+        Queue("{\"type\":\"progressDelta\",\"sequence\":" + std::to_string(sequence) + ",\"eventId\":\"" +
             NextEventID("progress") + "\"," + ProgressFields(delta, absoluteUnlocks, true) + "}");
     }
 

@@ -10,6 +10,13 @@ if (-not $NodePath) {
     }
 }
 if (-not $NodePath) { throw 'Node.js 22 or later is required to run the protocol tests.' }
-& (Join-Path $PSScriptRoot 'Build-Server.ps1')
-& $NodePath (Join-Path $PSScriptRoot 'tests\server.test.mjs')
-if ($LASTEXITCODE -ne 0) { throw 'Protocol tests failed.' }
+$testServer = Join-Path $PSScriptRoot 'obj\tests\SporeCoop.Server.test.exe'
+New-Item -ItemType Directory -Path (Split-Path -Parent $testServer) -Force | Out-Null
+& (Join-Path $PSScriptRoot 'Build-Server.ps1') -OutputPath $testServer
+$previousTestServer = $env:SPORE_COOP_TEST_SERVER
+try {
+    $env:SPORE_COOP_TEST_SERVER = $testServer
+    & $NodePath (Join-Path $PSScriptRoot 'tests\server.test.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Protocol tests failed.' }
+}
+finally { $env:SPORE_COOP_TEST_SERVER = $previousTestServer }

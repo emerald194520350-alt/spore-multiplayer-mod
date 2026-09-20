@@ -23,6 +23,7 @@ namespace SporeCoop
         public long AppearanceSequence = -1;
         public string Appearance = "";
         public long AppearanceModelInstance, AppearanceModelType, AppearanceModelGroup;
+        public long NpcSequence = -1;
         public readonly object SendLock = new object();
     }
 
@@ -38,6 +39,7 @@ namespace SporeCoop
         public string Fingerprint;
         public List<string> Applied = new List<string>();
         public bool ProgressInitialized;
+        public long HostProgressSequence, GuestProgressSequence;
         public int FoodProgression;
         public int PlantFoodProgression;
         public int OverPlantFoodProgression;
@@ -55,6 +57,9 @@ namespace SporeCoop
         public long SpeciesSequence;
         public bool InvitePending;
         public bool InviteAccepted;
+        public string InviteFrom;
+        public bool HostPaused;
+        public long WorldGeneration;
     }
 
     sealed class Proposal
@@ -69,7 +74,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 2;
+        const int Protocol = 3;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -125,6 +130,8 @@ namespace SporeCoop
             loaded.Editor = null;
             loaded.InvitePending = false;
             loaded.InviteAccepted = false;
+            loaded.InviteFrom = null;
+            loaded.HostPaused = false;
             return loaded;
         }
 
@@ -146,9 +153,31 @@ namespace SporeCoop
             return new { type = "state", protocol = Protocol, revision = State.Revision, dna = State.Dna,
                 stage = State.Stage, species = State.Species, evolving = State.Evolving,
                 invitePending = State.InvitePending, inviteAccepted = State.InviteAccepted,
+                inviteFrom = State.InviteFrom,
+                worldGeneration = State.WorldGeneration,
+                hostPaused = State.HostPaused,
                 editor = State.Editor, editorId = State.EditorID,
                 speciesSequence = State.SpeciesSequence,
                 progressInitialized = State.ProgressInitialized,
+                hostProgressSequence = State.HostProgressSequence,
+                guestProgressSequence = State.GuestProgressSequence,
+                // Keep the values at the root as well as in progress. Native
+                // protocol clients read root fields and use them to apply the
+                // same food milestones, growth and unlocked parts in both
+                // running worlds.
+                food = State.FoodProgression,
+                plantFood = State.PlantFoodProgression,
+                overPlantFood = State.OverPlantFoodProgression,
+                overAnimalFood = State.OverAnimalFoodProgression,
+                spent = State.EvolutionPointsSpent,
+                unlocks = State.CellUnlocks,
+                missions = State.CellMissions,
+                killCount = State.KillCount,
+                playerHasMoved = State.PlayerHasMoved,
+                playerHasEaten = State.PlayerHasEaten,
+                partCinematicPlayed = State.PartCinematicPlayed,
+                showMateButton = State.ShowMateButton,
+                firstEditorEntry = State.FirstEditorEntry,
                 progress = new {
                     food = State.FoodProgression,
                     plantFood = State.PlantFoodProgression,
@@ -253,6 +282,26 @@ namespace SporeCoop
             return (bool)value;
         }
 
+        static double[] NumberArray(Dictionary<string, object> data, string name, int count, double max)
+        {
+            object raw;
+            if (!data.TryGetValue(name, out raw) || !(raw is object[]) ||
+                (count >= 0 && ((object[])raw).Length != count) ||
+                (count < 0 && ((object[])raw).Length > 48 * 14))
+                throw new ArgumentException("Invalid " + name);
+            var values = (object[])raw;
+            var result = new double[values.Length];
+            for (int i = 0; i < values.Length; ++i)
+            {
+                if (!(values[i] is int || values[i] is long || values[i] is decimal || values[i] is double))
+                    throw new ArgumentException("Invalid " + name);
+                result[i] = Convert.ToDouble(values[i]);
+                if (double.IsNaN(result[i]) || double.IsInfinity(result[i]) || Math.Abs(result[i]) > max)
+                    throw new ArgumentException("Invalid " + name);
+            }
+            return result;
+        }
+
         static int[] IntegerArray(Dictionary<string, object> data, string name, int count, int max)
         {
             object value;
@@ -339,19 +388,38 @@ namespace SporeCoop
                     if (double.IsNaN(pos[i]) || double.IsInfinity(pos[i]) || Math.Abs(pos[i]) > 1000000)
                         throw new ArgumentException("Invalid position");
                 }
+                // Validate the whole packet before advancing its sequence. A
+                // rejected packet must not consume the sender's next update.
+                long modelInstance = Integer(data, "modelInstance", 1, uint.MaxValue);
+                long modelType = Integer(data, "modelType", 0, uint.MaxValue);
+                long modelGroup = Integer(data, "modelGroup", 0, uint.MaxValue);
+                long cellResource = Integer(data, "cellResource", 0, uint.MaxValue);
+                double scale = Number(data, "scale", 0.001, 100000);
+                double targetSize = Number(data, "targetSize", 0.001, 100000);
+                double opacity = Number(data, "opacity", 0, 1);
+                var renderPosition = data.ContainsKey("renderPosition") ? NumberArray(data, "renderPosition", 3, 1000000) : pos;
+                var orientation = data.ContainsKey("orientation") ? NumberArray(data, "orientation", 4, 1) : new double[] { 0, 0, 0, 1 };
+                double norm = 0;
+                foreach (var component in orientation) norm += component * component;
+                if (norm < 0.99 || norm > 1.01) throw new ArgumentException("Invalid orientation norm");
+                double renderScale = data.ContainsKey("renderScale") ? Number(data, "renderScale", 0.001, 100000) : scale;
+                long animation = data.ContainsKey("animation") ? Integer(data, "animation", 0, uint.MaxValue) : 0xAAAA0015;
+                bool visible = !data.ContainsKey("visible") || Boolean(data, "visible");
                 peer.Position = pos;
                 peer.Sequence = seq;
-                peer.ModelInstance = Integer(data, "modelInstance", 1, uint.MaxValue);
-                peer.ModelType = Integer(data, "modelType", 0, uint.MaxValue);
-                peer.ModelGroup = Integer(data, "modelGroup", 0, uint.MaxValue);
-                peer.CellResource = Integer(data, "cellResource", 0, uint.MaxValue);
-                peer.Scale = Number(data, "scale", 0.001, 100000);
-                peer.TargetSize = Number(data, "targetSize", 0.001, 100000);
-                peer.Opacity = Number(data, "opacity", 0, 1);
+                peer.ModelInstance = modelInstance;
+                peer.ModelType = modelType;
+                peer.ModelGroup = modelGroup;
+                peer.CellResource = cellResource;
+                peer.Scale = scale;
+                peer.TargetSize = targetSize;
+                peer.Opacity = opacity;
                 Broadcast(new { type = "position", role = peer.Role, sequence = seq, position = pos,
                     modelInstance = peer.ModelInstance, modelType = peer.ModelType,
                     modelGroup = peer.ModelGroup, cellResource = peer.CellResource,
-                    scale = peer.Scale, targetSize = peer.TargetSize, opacity = peer.Opacity });
+                    scale = peer.Scale, targetSize = peer.TargetSize, opacity = peer.Opacity,
+                    renderPosition = renderPosition, orientation = orientation, renderScale = renderScale,
+                    animation = animation, visible = visible });
                 return;
             }
             if (type == "appearance")
@@ -361,11 +429,14 @@ namespace SporeCoop
                     throw new ArgumentException("Stale appearance sequence");
                 string blob = Text(data, "appearance", 350000);
                 ValidateBlob(blob);
+                long modelInstance = Integer(data, "modelInstance", 1, uint.MaxValue);
+                long modelType = Integer(data, "modelType", 0, uint.MaxValue);
+                long modelGroup = Integer(data, "modelGroup", 0, uint.MaxValue);
                 peer.AppearanceSequence = sequence;
                 peer.Appearance = blob;
-                peer.AppearanceModelInstance = Integer(data, "modelInstance", 1, uint.MaxValue);
-                peer.AppearanceModelType = Integer(data, "modelType", 0, uint.MaxValue);
-                peer.AppearanceModelGroup = Integer(data, "modelGroup", 0, uint.MaxValue);
+                peer.AppearanceModelInstance = modelInstance;
+                peer.AppearanceModelType = modelType;
+                peer.AppearanceModelGroup = modelGroup;
                 Broadcast(new { type = "appearance", role = peer.Role, sequence = sequence,
                     modelInstance = peer.AppearanceModelInstance,
                     modelType = peer.AppearanceModelType,
@@ -374,28 +445,99 @@ namespace SporeCoop
                 return;
             }
             if (!Peers.ContainsKey("host")) throw new ArgumentException("Host offline");
+            if (type == "npcSnapshot")
+            {
+                if (!State.InviteAccepted || peer.Role != State.InviteFrom)
+                    throw new ArgumentException("World owner authority required");
+                long sequence = Integer(data, "sequence", 0, long.MaxValue);
+                if (sequence <= peer.NpcSequence) throw new ArgumentException("Stale NPC sequence");
+                // Pool handles are unsigned 32-bit values and frequently have
+                // their high bit set, so the generic array ceiling must allow
+                // the full ID range. Per-field limits below still constrain
+                // coordinates, rotations and sizes.
+                var npcs = NumberArray(data, "npcs", -1, uint.MaxValue);
+                if (npcs.Length % 14 != 0) throw new ArgumentException("Invalid npcs");
+                var ids = new HashSet<uint>();
+                for (int i = 0; i < npcs.Length; i += 14)
+                {
+                    if (npcs[i] < 0 || npcs[i] > uint.MaxValue || npcs[i] != Math.Floor(npcs[i]) ||
+                        npcs[i + 1] <= 0 || npcs[i + 1] > uint.MaxValue || npcs[i + 1] != Math.Floor(npcs[i + 1]) ||
+                        Math.Abs(npcs[i + 2]) > 1000000 || Math.Abs(npcs[i + 3]) > 1000000 ||
+                        Math.Abs(npcs[i + 4]) > 1000000 || Math.Abs(npcs[i + 5]) > 1 ||
+                        Math.Abs(npcs[i + 6]) > 1 ||
+                        npcs[i + 7] < 0.001 || npcs[i + 7] > 100000 ||
+                        npcs[i + 8] < 0.001 || npcs[i + 8] > 100000 ||
+                        npcs[i + 9] < 0 || npcs[i + 9] > 1 ||
+                        npcs[i + 10] < -1 || npcs[i + 10] > 19 || npcs[i + 10] != Math.Floor(npcs[i + 10]))
+                        throw new ArgumentException("Invalid npcs");
+                    double orientationNorm = npcs[i + 5] * npcs[i + 5] + npcs[i + 6] * npcs[i + 6];
+                    if (orientationNorm < 0.99 || orientationNorm > 1.01)
+                        throw new ArgumentException("Invalid npcs");
+                    for (int field = 11; field < 14; ++field)
+                        if (npcs[i + field] < 0 || npcs[i + field] > uint.MaxValue ||
+                            npcs[i + field] != Math.Floor(npcs[i + field]))
+                            throw new ArgumentException("Invalid npcs");
+                    if (npcs[i + 11] == 0 || !ids.Add((uint)npcs[i]))
+                        throw new ArgumentException("Invalid npcs");
+                }
+                peer.NpcSequence = sequence;
+                Broadcast(new { type = "npcSnapshot", role = peer.Role,
+                    sequence = sequence, npcs = npcs });
+                return;
+            }
+            if (type == "hostPause")
+            {
+                if (peer.Role != State.InviteFrom)
+                    throw new ArgumentException("World owner authority required");
+                bool paused = Boolean(data, "paused");
+                if (!State.InviteAccepted && paused)
+                    throw new ArgumentException("Invitation must be accepted");
+                if (State.HostPaused == paused) { Send(peer, Snapshot()); return; }
+                State.HostPaused = paused;
+                Changed();
+                return;
+            }
             if (type == "invite")
             {
-                HostOnly(peer);
                 if (!Peers.ContainsKey("guest")) throw new ArgumentException("Guest offline");
+                if (State.InvitePending || State.InviteAccepted)
+                    throw new ArgumentException("Invitation already active");
                 State.InvitePending = true;
                 State.InviteAccepted = false;
+                State.InviteFrom = peer.Role;
+                ++State.WorldGeneration;
+                State.HostPaused = false;
+                // A new invitation selects a new authoritative saved world.
+                // Its cell tutorial state must be seeded by that world's owner,
+                // not inherited from an earlier invitation in the same server.
+                State.ProgressInitialized = false;
+                State.HostProgressSequence = State.GuestProgressSequence = 0;
+                foreach (var connectedPeer in Peers.Values) connectedPeer.NpcSequence = -1;
+                State.FoodProgression = State.PlantFoodProgression = 0;
+                State.OverPlantFoodProgression = State.OverAnimalFoodProgression = 0;
+                State.EvolutionPointsSpent = 0;
+                State.CellUnlocks = new int[13];
+                State.CellMissions = new int[24];
+                State.KillCount = 0;
+                State.PlayerHasMoved = State.PlayerHasEaten = false;
+                State.PartCinematicPlayed = State.ShowMateButton = State.FirstEditorEntry = false;
                 Changed();
                 return;
             }
             if (type == "inviteResponse")
             {
-                if (peer.Role != "guest") throw new ArgumentException("Guest authority required");
+                if (peer.Role == State.InviteFrom) throw new ArgumentException("The inviter cannot accept their own invitation");
                 if (!State.InvitePending) throw new ArgumentException("No pending invitation");
                 bool accepted = Boolean(data, "accepted");
                 State.InvitePending = false;
                 State.InviteAccepted = accepted;
+                if (!accepted) State.HostPaused = false;
                 Changed();
                 return;
             }
             if (type == "seedProgress")
             {
-                HostOnly(peer);
+                if (peer.Role != State.InviteFrom) throw new ArgumentException("World owner authority required");
                 if (State.ProgressInitialized) { Send(peer, Snapshot()); return; }
                 State.FoodProgression = (int)Integer(data, "food", 0, 100000000);
                 State.PlantFoodProgression = (int)Integer(data, "plantFood", 0, 100000000);
@@ -416,8 +558,12 @@ namespace SporeCoop
             }
             if (type == "progressDelta")
             {
+                if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
                 if (!State.ProgressInitialized) throw new ArgumentException("Progress is not initialized");
                 string id = EventId(data);
+                long sequence = Integer(data, "sequence", 1, long.MaxValue);
+                long lastSequence = peer.Role == "host" ? State.HostProgressSequence : State.GuestProgressSequence;
+                if (sequence != lastSequence + 1) throw new ArgumentException("Out of order progress sequence");
                 int food = (int)Integer(data, "food", 0, 1000000);
                 int plant = (int)Integer(data, "plantFood", 0, 1000000);
                 int overPlant = (int)Integer(data, "overPlantFood", 0, 1000000);
@@ -431,14 +577,15 @@ namespace SporeCoop
                 bool partCinematicPlayed = Boolean(data, "partCinematicPlayed");
                 bool showMateButton = Boolean(data, "showMateButton");
                 bool firstEditorEntry = Boolean(data, "firstEditorEntry");
-                long nextFood = Math.Max(State.FoodProgression, food);
-                long nextPlant = Math.Max(State.PlantFoodProgression, plant);
-                long nextOverPlant = Math.Max(State.OverPlantFoodProgression, overPlant);
-                long nextOverAnimal = Math.Max(State.OverAnimalFoodProgression, overAnimal);
+                long nextFood = (long)State.FoodProgression + food;
+                long nextPlant = (long)State.PlantFoodProgression + plant;
+                long nextOverPlant = (long)State.OverPlantFoodProgression + overPlant;
+                long nextOverAnimal = (long)State.OverAnimalFoodProgression + overAnimal;
                 long nextSpent = (long)State.EvolutionPointsSpent + spent;
-                if (nextFood > int.MaxValue || nextPlant > int.MaxValue ||
-                    nextOverPlant > int.MaxValue || nextOverAnimal > int.MaxValue ||
-                    nextSpent < 0 || nextSpent > int.MaxValue)
+                long nextKills = (long)State.KillCount + killCount;
+                if (nextFood > 100000000 || nextPlant > 100000000 ||
+                    nextOverPlant > 100000000 || nextOverAnimal > 100000000 ||
+                    nextKills > 100000000 || nextSpent < 0 || nextSpent > 100000000)
                     throw new ArgumentException("Shared progress overflow");
                 State.FoodProgression = (int)nextFood;
                 State.PlantFoodProgression = (int)nextPlant;
@@ -449,18 +596,21 @@ namespace SporeCoop
                     State.CellUnlocks[i] = Math.Max(State.CellUnlocks[i], unlocks[i]);
                 for (int i = 0; i < 24; i++)
                     State.CellMissions[i] = Math.Max(State.CellMissions[i], missions[i]);
-                State.KillCount = Math.Max(State.KillCount, killCount);
+                State.KillCount = (int)nextKills;
                 State.PlayerHasMoved |= playerHasMoved;
                 State.PlayerHasEaten |= playerHasEaten;
                 State.PartCinematicPlayed |= partCinematicPlayed;
                 State.ShowMateButton |= showMateButton;
                 State.FirstEditorEntry |= firstEditorEntry;
                 State.Applied.Add(id);
+                if (peer.Role == "host") State.HostProgressSequence = sequence;
+                else State.GuestProgressSequence = sequence;
                 Changed();
                 return;
             }
             if (type == "editorOpen")
             {
+                if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
                 long editorId = Integer(data, "editorId", 0, uint.MaxValue);
                 if (!State.Evolving)
                 {
@@ -477,6 +627,7 @@ namespace SporeCoop
             }
             if (type == "speciesLive")
             {
+                if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
                 if (!State.Evolving) throw new ArgumentException("Editor is not open");
                 long sequence = Integer(data, "sequence", 0, long.MaxValue);
                 if (sequence <= peer.EditorSequence) throw new ArgumentException("Stale species sequence");
@@ -491,6 +642,8 @@ namespace SporeCoop
             }
             if (type == "editorClose")
             {
+                if (!State.InviteAccepted || !State.Evolving)
+                    throw new ArgumentException("Editor is not open in an accepted session");
                 string blob = Text(data, "species", 350000);
                 ValidateBlob(blob);
                 if (!String.IsNullOrEmpty(blob))
@@ -692,8 +845,18 @@ namespace SporeCoop
                         var oldReady = new HashSet<string>(Ready);
                         Proposal oldPending = Pending;
                         try { Handle(peer, data); }
-                        catch (ArgumentException error) { Send(peer, new { type = "error", message = error.Message }); }
-                        catch (FormatException) { Send(peer, new { type = "error", message = "Invalid base64 species" }); }
+                        catch (ArgumentException error)
+                        {
+                            State = Json.Deserialize<Session>(before);
+                            Ready.Clear(); Ready.UnionWith(oldReady); Pending = oldPending;
+                            Send(peer, new { type = "error", message = error.Message });
+                        }
+                        catch (FormatException)
+                        {
+                            State = Json.Deserialize<Session>(before);
+                            Ready.Clear(); Ready.UnionWith(oldReady); Pending = oldPending;
+                            Send(peer, new { type = "error", message = "Invalid base64 species" });
+                        }
                         catch (IOException)
                         {
                             State = Json.Deserialize<Session>(before);
@@ -733,6 +896,8 @@ namespace SporeCoop
                         State.Editor = null;
                         State.InvitePending = false;
                         State.InviteAccepted = false;
+                        State.InviteFrom = null;
+                        State.HostPaused = false;
                         Ready.Clear();
                         Pending = null;
                         if (peer.Role == "host")
