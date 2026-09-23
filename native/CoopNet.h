@@ -114,6 +114,7 @@ namespace CoopNet
         std::uint64_t speciesAck = 0;
         bool speciesConflict = false;
         std::string speciesBlob;
+        int editorBudget = -1;
     };
 
     bool StartFromEnvironment();
@@ -137,7 +138,7 @@ namespace CoopNet
     void SeedProgress(const CellProgress& progress);
     void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
         const std::array<int, 13>& absoluteUnlocks);
-    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies = {});
-    void SubmitEditorClose(const std::string& speciesBlob);
-    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence);
+    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies, int budget);
+    void SubmitEditorClose(const std::string& speciesBlob, int budget);
+    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence, int budget);
 }

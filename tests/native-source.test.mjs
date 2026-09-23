@@ -32,7 +32,7 @@ const sharedEditor = body(probe, 'void UpdateSharedEditor(', 'constexpr uint32_t
 const serializeEditor = body(probe, 'std::string SerializeEditorModel()', 'bool ApplyEditorModel(');
 assert.match(serializeEditor,/HistorySlot[\s\S]*SerializeEditorResource\(editor->mEditHistory\[index\]\.get\(\)\)/,
   'Publishing must read the completed native edit transaction, including undo/redo');
-assert.match(sharedEditor,/if \(editorActive && gEditorInitialModelPending\)[\s\S]*!ApplyEditorModel\(snapshot.speciesBlob\)[\s\S]*gAppliedSpeciesSequence = snapshot.speciesSequence/,
+assert.match(sharedEditor,/if \(editorActive && gEditorInitialModelPending\)[\s\S]*!ApplyEditorModel\(snapshot.speciesBlob,snapshot.editorBudget\)[\s\S]*gAppliedSpeciesSequence = snapshot.speciesSequence/,
   'A mirrored entry is not acknowledged until the shared body is actually applied');
 assert.doesNotMatch(serializeEditor,/mpActiveHandle/,
   'A hovered handle must not block publication of a committed edit');
@@ -61,7 +61,7 @@ assert.match(probe, /GetRemoveCellFunction\(\)[\s\S]*MatchesRemovalAbi/,
 
 assert.match(net, /std::uint64_t gSpeciesSequence = 1;/,
   'The first appearance sequence must be newer than the zero-initialized receiver state');
-assert.match(net, /constexpr int kProtocol = 4;/,
+assert.match(net, /constexpr int kProtocol = 5;/,
   'The native client must reject older incompatible protocol builds');
 assert.doesNotMatch(updateRemote,
   /ResourceKey\(snapshot\.remoteModelInstance[\s\S]*snapshot\.remoteModelGroup\)/,

@@ -38,37 +38,20 @@ inline bool TestSharedWorld()
     auto confirmed=b.Reconcile(server,be.sequence);
     require(confirmed.missions[1]==6&&!b.Capture(confirmed,be),"Quest acknowledgements never echo");
     using namespace CoopEditor;
-    struct Part { int mModelPrice; std::shared_ptr<Part> mpSymmetricRigblock; };
-    auto spike = std::make_shared<Part>(); spike->mModelPrice=10;
-    auto mirror = std::make_shared<Part>(); mirror->mModelPrice=10;
-    spike->mpSymmetricRigblock=mirror;
-    mirror->mpSymmetricRigblock=spike;
-    int price=0, budget=0;
-    require(ModelPrice(std::vector<std::shared_ptr<Part>>{spike,mirror},price) && price==10,
-        "A mirrored spike pair is a single ten-DNA purchase");
-    require(ModelPrice(std::vector<std::shared_ptr<Part>>{mirror,spike},price) && price==10,
-        "Part order cannot change a symmetric pair's price");
-    struct BlockPrice { unsigned instanceID, groupID; int symmetricIndex; bool isAsymmetric; };
-    std::vector<BlockPrice> pair{{1,2,1,false},{1,2,0,false},{3,2,-1,false}};
-    auto properties=[](const BlockPrice& block,int& value){value=block.instanceID==1?10:0; return true;};
-    require(ResourcePrice(pair,properties,price) && price==10,
-        "Incoming unloaded pair uses native property prices and the free body stays free");
-    pair[1].symmetricIndex=99;
-    require(!ResourcePrice(pair,properties,price),"Broken symmetry cannot hide part costs");
-    require(ReplacementBudget(16,30,40,budget) && budget==6,
-        "Remote spike placement spends ten DNA: 16 becomes 6");
-    require(ReplacementBudget(budget,40,40,budget) && budget==6,
-        "Repeated snapshots and paint-only changes never double charge");
-    require(ReplacementBudget(budget,40,30,budget) && budget==16,
-        "Deletion or undo refunds the price difference");
-    require(ReplacementBudget(26,40,50,budget) && budget==16,
-        "Merged remote edits only charge the difference from the already-paid local model");
-    require(!ReplacementBudget(6,30,40,budget) && !ReplacementBudget(INT_MAX,10,0,budget),
-        "Unfunded concurrent edits and overflowing balances cannot create free parts");
-    spike->mpSymmetricRigblock.reset(); mirror->mpSymmetricRigblock.reset();
-    require(ModelPrice(std::vector<std::shared_ptr<Part>>{spike,mirror},price) && price==20,
-        "Independent asymmetric parts are separate purchases");
+    int budget=0;
+    require(MergeBudget(16,16,6,false,budget) && budget==6,"Peer receives the exact native balance: 16 becomes 6");
+    require(MergeBudget(6,6,6,false,budget) && budget==6,"Repeated model/budget snapshots never double-charge");
+    require(MergeBudget(6,6,16,false,budget) && budget==16,"Undo and deletion restore the transmitted balance");
+    require(MergeBudget(36,26,26,true,budget) && budget==16,"Concurrent native purchases retain both ten-DNA charges");
+    require(MergeBudget(16,6,6,false,budget) && budget==6,"An identical merged edit is not charged twice");
+    require(!MergeBudget(16,6,6,true,budget),"Unfunded concurrent edits cannot produce a negative balance");
+    require(!MergeBudget(-1,6,6,true,budget) && !MergeBudget(0,100000000,100000000,true,budget),"Invalid and overflowing budget rebase rejected");
     std::uint32_t animation=0;
+    require(CoopVisual::MouthAnimationId(79)==0xAAAA0075 &&
+        CoopVisual::MouthAnimationId(0xAAAA0075)==0xAAAA0075 &&
+        CoopVisual::MouthAnimationId(13)==0xAAAA0007 &&
+        CoopVisual::MouthAnimationId(UINT32_MAX)==0,
+        "Mouth replication accepts actual visual TLSA groups as well as native indices, and rejects other animations");
     require(CoopVisual::MouthTransition(79,0,animation) && animation==79 &&
         !CoopVisual::MouthTransition(79,79,animation), "Chewing starts once, without restarting each graphics frame");
     require(CoopVisual::MouthTransition(4,79,animation) && animation==0,

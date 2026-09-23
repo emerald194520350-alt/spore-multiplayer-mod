@@ -300,13 +300,19 @@ int main(int argc, char** argv)
         HandleMessage("{\"type\":\"state\",\"worldGeneration\":51,\"evolving\":true,\"speciesSequence\":1,\"species\":\"shared-entry\"}");
         Check(gSnapshot.speciesSequence == 1 && gSnapshot.speciesBlob == "shared-entry",
             "The new editor's initial body is accepted even after a higher revision in a previous campaign");
-        HandleMessage("{\"type\":\"speciesLive\",\"role\":\"host\",\"sequence\":2,\"clientSequence\":201,\"species\":\"body-with-spikes\"}");
+        HandleMessage("{\"type\":\"speciesLive\",\"role\":\"host\",\"sequence\":2,\"editorBudget\":6,\"clientSequence\":201,\"species\":\"body-with-spikes\"}");
         Check(gSnapshot.speciesSequence == 2 && gSnapshot.speciesBlob == "body-with-spikes" &&
             gSnapshot.speciesAck == 201 && !gSnapshot.speciesConflict,
             "A committed spike edit advances the shared revision and acknowledges the local transaction");
+        Check(gSnapshot.editorBudget==6,"The model and native DNA balance arrive atomically");
+        HandleMessage("{\"type\":\"speciesLive\",\"role\":\"guest\",\"sequence\":3,\"species\":\"bad\",\"editorBudget\":-4}");
+        Check(gSnapshot.speciesSequence==2 && gSnapshot.editorBudget==6,"Invalid budget cannot advance the model revision");
+        HandleMessage("{\"type\":\"speciesLive\",\"role\":\"guest\",\"sequence\":3,\"species\":\"bad\"}");
+        Check(gSnapshot.speciesSequence==2,"Model packets without their budget are rejected");
         HandleMessage("{\"type\":\"state\",\"worldGeneration\":51,\"speciesSequence\":1,\"species\":\"shared-entry\"}");
         Check(gSnapshot.speciesSequence == 2 && gSnapshot.speciesBlob == "body-with-spikes",
             "An older snapshot in the same campaign cannot undo a newer live edit");
+        Check(gSnapshot.editorBudget==6,"Older full snapshots cannot overwrite a newer budget");
         gSnapshot.sessionEnded = false;
         gSnapshot.connected = gSnapshot.inviteAccepted = true;
         HandleMessage("{\"type\":\"sessionEnded\",\"reason\":\"host_left\"}");

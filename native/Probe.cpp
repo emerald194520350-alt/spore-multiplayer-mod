@@ -187,6 +187,7 @@ namespace
     uint64_t gAppliedSpeciesSequence = 0;
     uint64_t gPendingSpeciesSequence = 0;
     std::string gPendingSpecies;
+    int gLastLocalBudget = -1, gPendingBudget = -1, gLastEditorBudget = -1;
     ULONG64 gLastNpcSnapshotTick = 0;
 
     struct MirroredNpc
@@ -428,22 +429,8 @@ namespace
         return functions;
     }
 
-    void SyncMouthAnimation(Simulator::Cell::cCellObjectData* cell, std::uint32_t incoming)
-    {
-        using Play = float(__cdecl*)(Simulator::Cell::cCellObjectData*,
-            Simulator::Cell::cCellObjectData*, int, int);
-        static const auto play = reinterpret_cast<Play>(VerifiedMotionCode(CoopEngine::kPlayCellAnimationRva,
-            CoopEngine::kPlayCellAnimationSize, CoopEngine::kPlayCellAnimationHash,
-            CoopEngine::kPlayCellAnimationRelocations));
-        if (!play || !cell || !cell->mModelKey.instanceID ||
-            !CoopVisual::HasCellIndex(cell->mGFXObjectIndex)) return;
-        std::uint32_t target = 0;
-        if (!CoopVisual::MouthTransition(incoming, cell->mCurrentAnimation, target)) return;
-        // E6D200 starts the structure animation, unlike assigning mCurrentAnimation.
-        // No food target is passed: damage/pickups stay with the real player.
-        play(cell, nullptr, static_cast<int>(target), cell->mCurrentAnimation);
-        cell->field_18C = static_cast<Simulator::Cell::CellAnimations>(target);
-    }
+    void SyncMouthAnimation(Simulator::Cell::cCellObjectData* cell, std::uint32_t incoming);
+    std::uint32_t ReadMouthAnimation(Simulator::Cell::cCellObjectData* cell);
 
     bool MoveCellBody(Simulator::Cell::cCellObjectData* cell, const Math::Vector3& position,
         const Math::Quaternion& orientation)
@@ -705,7 +692,7 @@ namespace
         // invisible on the peer. Native clones consume the cell transform,
         // including its orientation, rather than a nested model transform.
         pose.visible = player->mOpacity > 0;
-        pose.animation = static_cast<uint32_t>(player->mCurrentAnimation);
+        pose.animation = ReadMouthAnimation(player);
         const auto orientation = player->mTransform.GetRotation().ToQuaternion();
         const float length = std::sqrt(orientation.x*orientation.x + orientation.y*orientation.y +
             orientation.z*orientation.z + orientation.w*orientation.w);
@@ -1314,6 +1301,68 @@ namespace
         return visual && visual->mCellIndex == cell->Index() ? visual : nullptr;
     }
 
+    template<class Visit>
+    void VisitCellCreatures(Simulator::Cell::cCellObjectData* cell, Visit visit)
+    {
+        auto visual=GetCellVisual(cell);
+        if (!visual) return;
+        if (visual->mpAnimatedCreature) visit(visual->mpAnimatedCreature);
+        cCellStructureResourcePtr reference;
+        auto structure=visual->mpStructure ? Simulator::Cell::GetData(visual->mpStructure,reference) : nullptr;
+        if (!structure || !structure->attachments) return;
+        const int count=std::min({10,visual->mNumStructureGFX,structure->numAttachments});
+        using Type=Simulator::Cell::cCellStructureResource::cSPAttachment::Type;
+        for (int i=0;i<count;++i)
+        {
+            const auto type=structure->attachments[i].type;
+            auto object=visual->mStructureGFXs[i];
+            if (object && object!=visual->mpAnimatedCreature &&
+                (type==Type::Creature || type==Type::RandomCreature || type==Type::PlayerCreature))
+                visit(static_cast<Anim::AnimatedCreature*>(object));
+        }
+    }
+
+    std::uint32_t ReadMouthAnimation(Simulator::Cell::cCellObjectData* cell)
+    {
+        std::uint32_t result=0;
+        VisitCellCreatures(cell,[&](Anim::AnimatedCreature* creature) {
+            std::uint32_t animation=0;
+            creature->GetCurrentAnimation(&animation);
+            if (CoopVisual::MouthAnimationId(animation)) result=animation;
+        });
+        return result ? result : (cell ? CoopVisual::MouthAnimationId(cell->mCurrentAnimation) : 0);
+    }
+
+    void SyncMouthAnimation(Simulator::Cell::cCellObjectData* cell, std::uint32_t incoming)
+    {
+        const auto mouth=CoopVisual::MouthAnimationId(incoming);
+        VisitCellCreatures(cell,[&](Anim::AnimatedCreature* creature) {
+            std::uint32_t current=0;
+            creature->GetCurrentAnimation(&current);
+            if (!mouth && !CoopVisual::MouthAnimationId(current)) return;
+            const auto target=mouth ? mouth : 0xAAAA0015u;
+            if (target==current) return;
+            // E4F310 only visits attachment type 3. PlayerCreature (5) and
+            // RandomCreature (4) can have no mpAnimatedCreature at all, so
+            // replay on their actual AnimatedCreature objects explicitly.
+            const auto index=creature->LoadAnimation(target);
+            if (index < 0) return;
+            creature->SetAnimationMode(index,1);
+            creature->SetAnimationIdle(index,!mouth);
+            creature->SetAnimationBlendInTime(index,0.1f);
+            creature->SetLoop(index,!mouth);
+            if (!mouth) creature->SetLoopTimes(index,-1.0f);
+            creature->StartAnimation(index);
+            static ULONG64 lastTrace=0;
+            if (GetTickCount64()-lastTrace>500)
+            {
+                char line[140]{};
+                sprintf_s(line,"MouthSync: cell=%d incoming=%08X target=%08X slot=%d",cell->Index(),incoming,target,index);
+                WriteProbeLog(line); lastTrace=GetTickCount64();
+            }
+        });
+    }
+
     struct VisualPosition
     {
         Math::Vector3 position{NAN, NAN, NAN};
@@ -1442,7 +1491,7 @@ namespace
                 proxy->mTransform.SetScale(player->mTransform.GetScale());
                 player->mOpacity = player->mTargetOpacity = 0.0f;
                 proxy->mOpacity = proxy->mTargetOpacity = 1.0f;
-                SyncMouthAnimation(proxy, static_cast<std::uint32_t>(player->mCurrentAnimation));
+                SyncMouthAnimation(proxy, ReadMouthAnimation(player));
             }
             if (!CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) &&
                 !IsPartCinematic(game) &&
@@ -1647,21 +1696,25 @@ namespace
         return SerializeEditorResource(resource.get());
     }
 
-    bool EditorResourcePrice(Editors::cEditorResource* resource, int& price)
+    int CommittedEditorBudget()
     {
-        return resource && CoopEditor::ResourcePrice(resource->mBlocks,
-            [](const Editors::cEditorResourceBlock& block, int& value) {
-                PropertyListPtr properties;
-                if (!PropManager.GetPropertyList(block.instanceID,block.groupID,properties)) return false;
-                value = 0;
-                // 4433AE reads 0x02166464 into EditorRigblock::mModelPrice.
-                // Missing price defaults to zero, e.g. the Cell body spine.
-                App::Property::GetInt32(properties.get(),0x02166464,value);
-                return true;
-            }, price);
+        auto editor = Editors::GetEditor();
+        if (!editor || !editor->mpEditorLimits) return -1;
+        const auto slot = CoopEditor::HistorySlot(editor->mEditHistoryIndex, editor->mStateEditHistory.size());
+        if (!gEditorHistoryPending && slot >= 0 && editor->mStateEditHistory[slot])
+            return editor->mStateEditHistory[slot]->mBudget;
+        return editor->mpEditorLimits->GetValue(Editors::StdEditorLimits::kBudget);
     }
 
-    bool ApplyEditorModel(const std::string& blob)
+    void ApplyEditorBudget(int budget)
+    {
+        auto editor = Editors::GetEditor();
+        if (!editor || !editor->mpEditorLimits || !CoopEditor::ValidBudget(budget)) return;
+        editor->mpEditorLimits->SetValue(Editors::StdEditorLimits::kBudget,budget);
+        gLastEditorBudget = budget;
+    }
+
+    bool ApplyEditorModel(const std::string& blob, int budget)
     {
         auto editor = Editors::GetEditor();
         if (!editor || !editor->IsActive() || !editor->GetEditorModel() ||
@@ -1680,25 +1733,7 @@ namespace
         model->Load(resource.get());
         if (model->mRigblocks.empty()) { delete model; return false; }
         auto limits = editor->mpEditorLimits.get();
-        int oldPrice = 0, newPrice = 0, budget = limits ? limits->GetValue(Editors::StdEditorLimits::kBudget) : 0;
-        // Load has not parsed the new rigblocks' prices yet. Price the resource
-        // directly; otherwise zero-initialized fields refund the entire body.
-        bool priced = EditorResourcePrice(resource.get(), newPrice);
-        if (gEditorInitialModelPending)
-        {
-            // Native entry already paid for the species used to enter. Its
-            // temporary green fallback is not a purchase. Still charge edits
-            // that arrived while this window was entering the editor.
-            oldPrice = newPrice;
-            if (gEditorEntryResource) priced = priced && EditorResourcePrice(gEditorEntryResource.get(),oldPrice);
-        }
-        else priced = priced && CoopEditor::ModelPrice(previous->mRigblocks, oldPrice);
-        if (!limits || !priced || !CoopEditor::ReplacementBudget(budget, oldPrice, newPrice, budget))
-        {
-            delete model;
-            WriteProbeLog("EditorSync: cannot afford or price merged model; retaining local edit.");
-            return false;
-        }
+        if (!limits || !CoopEditor::ValidBudget(budget)) { delete model; return false; }
         // SCP1 carries body and paint; names are local editor metadata. Load
         // clears them, so preserve them before the old model is disposed.
         model->mName = previous->mName;
@@ -1707,9 +1742,9 @@ namespace
         editor->SetEditorModel(model);
         if (limits)
         {
-            limits->SetValue(Editors::StdEditorLimits::kBudget, budget);
+            ApplyEditorBudget(budget);
             char line[160]{};
-            sprintf_s(line, "EditorSync: shared budget=%d price=%d->%d", budget, oldPrice, newPrice);
+            sprintf_s(line, "EditorSync: applied model with native budget=%d", budget);
             WriteProbeLog(line);
         }
         model->mSkinNeedsUpdating = true;
@@ -1750,11 +1785,8 @@ namespace
         {
             if (messageID != Simulator::kMsgEnterEditor || !value || gSuppressEditorRelay)
                 return false;
-            const auto snapshot = CoopNet::GetSnapshot();
-            if (!snapshot.enabled || !snapshot.connected || !snapshot.inviteAccepted) return false;
-            const auto* message = static_cast<Simulator::EnterEditorMessage*>(value);
-            CoopNet::SubmitEditorOpen(message->mEditorID, SerializeCreation(message->mCreationName));
-            WriteProbeLog("Relayed local editor entry to the cooperative peer.");
+            // Publish from UpdateSharedEditor after the native budget and model
+            // are ready; the enter-editor message arrives before initialization.
             return false;
         }
     };
@@ -1767,6 +1799,7 @@ namespace
             gObservedEditorModel = nullptr;
             gEditorHistoryPending = false;
             gEditorInitialModelPending = false;
+            gLastLocalBudget = gPendingBudget = gLastEditorBudget = -1;
             gMirroredEditorRequestID = 0;
             gMirroredEditorRequestTick = 0;
             return;
@@ -1828,15 +1861,17 @@ namespace
             editor->CommitEditHistory(true);
             gEditorHistoryPending = false;
         }
+        if (editorReady) gLastEditorBudget = CommittedEditorBudget();
         // A cache key handed to the campaign entry is not proof that the
         // editor loaded it. Cell can fall back to a default green body. Apply
         // the authoritative resource explicitly before this peer can publish.
         if (editorActive && gEditorInitialModelPending)
         {
-            if (snapshot.speciesBlob.empty() || !ApplyEditorModel(snapshot.speciesBlob)) return;
+            if (snapshot.speciesBlob.empty() || !ApplyEditorModel(snapshot.speciesBlob,snapshot.editorBudget)) return;
             gAppliedSpeciesSequence = snapshot.speciesSequence;
             gEditorEntrySpeciesSequence = snapshot.speciesSequence;
             gLastLocalSpecies = snapshot.speciesBlob;
+            gLastLocalBudget = snapshot.editorBudget;
             gPendingSpeciesSequence = 0; gPendingSpecies.clear();
             gEditorInitialModelPending = false;
             gWasEditorMode = true;
@@ -1846,6 +1881,8 @@ namespace
         if (editorActive && !gWasEditorMode)
         {
             gLastLocalSpecies=SerializeEditorModel();
+            gLastLocalBudget=CommittedEditorBudget();
+            if (!CoopEditor::ValidBudget(gLastLocalBudget)) return;
             gPendingSpeciesSequence=0; gPendingSpecies.clear();
             if (snapshot.editorOpen)
                 gAppliedSpeciesSequence = snapshot.editorRole == CoopNet::GetRole()
@@ -1856,7 +1893,7 @@ namespace
                 // species belongs to the previous visit. Do not reload that
                 // old body/paint while the new editor is opening.
                 gAppliedSpeciesSequence = snapshot.speciesSequence;
-                CoopNet::SubmitEditorOpen(editor->mEditorName,gLastLocalSpecies);
+                CoopNet::SubmitEditorOpen(editor->mEditorName,gLastLocalSpecies,gLastLocalBudget);
             }
         }
 
@@ -1867,9 +1904,10 @@ namespace
             snapshot.speciesSequence > gAppliedSpeciesSequence && !snapshot.speciesBlob.empty() &&
             !editor->mpMovingPart && !editor->mMouseState.IsLeftButtonDown)
         {
-            if (ApplyEditorModel(snapshot.speciesBlob))
+            if (ApplyEditorModel(snapshot.speciesBlob,snapshot.editorBudget))
             {
                 gLastLocalSpecies=snapshot.speciesBlob;
+                gLastLocalBudget=snapshot.editorBudget;
                 gAppliedSpeciesSequence=snapshot.speciesSequence;
                 gPendingSpeciesSequence=0; gPendingSpecies.clear();
             }
@@ -1878,9 +1916,10 @@ namespace
         if (editorActive && snapshot.editorOpen && now-gLastSpeciesTick>=100)
         {
             auto current=SerializeEditorModel();
+            auto currentBudget=CommittedEditorBudget();
             if (gPendingSpeciesSequence && snapshot.speciesAck>=gPendingSpeciesSequence)
             {
-                if (!snapshot.speciesConflict) gLastLocalSpecies=gPendingSpecies;
+                if (!snapshot.speciesConflict) { gLastLocalSpecies=gPendingSpecies; gLastLocalBudget=gPendingBudget; }
                 gPendingSpeciesSequence=0; gPendingSpecies.clear();
             }
             if (!gPendingSpeciesSequence && !current.empty())
@@ -1893,9 +1932,19 @@ namespace
                     if (CoopEditor::Merge(base,local,remote,merged))
                     {
                         const auto value=Base64Encode(merged);
-                        if (value==current || ApplyEditorModel(value))
+                        int mergedBudget=0;
+                        if (CoopEditor::MergeBudget(gLastLocalBudget,currentBudget,snapshot.editorBudget,
+                            value!=snapshot.speciesBlob,mergedBudget) &&
+                            (value==current || ApplyEditorModel(value,mergedBudget)))
                         {
+                            if (value==current && currentBudget!=mergedBudget)
+                            {
+                                ApplyEditorBudget(mergedBudget);
+                                editor->CommitEditHistory(true);
+                            }
+                            currentBudget=mergedBudget;
                             current=value; gLastLocalSpecies=snapshot.speciesBlob;
+                            gLastLocalBudget=snapshot.editorBudget;
                             gAppliedSpeciesSequence=snapshot.speciesSequence;
                         }
                     }
@@ -1904,7 +1953,8 @@ namespace
                 if (gAppliedSpeciesSequence==snapshot.speciesSequence && current!=gLastLocalSpecies)
                 {
                     gPendingSpecies=current;
-                    gPendingSpeciesSequence=CoopNet::SubmitSpecies(current,gAppliedSpeciesSequence);
+                    gPendingBudget=currentBudget;
+                    gPendingSpeciesSequence=CoopNet::SubmitSpecies(current,gAppliedSpeciesSequence,currentBudget);
                     char line[160]{};
                     sprintf_s(line,"EditorSync: sent committed model client=%llu base=%llu bytes=%u",
                         gPendingSpeciesSequence,gAppliedSpeciesSequence,unsigned(current.size()));
@@ -1919,7 +1969,8 @@ namespace
             auto game=Simulator::Cell::cCellGame::Get();
             auto data=game ? game->mpSerializableData.get() : nullptr;
             auto saved=data ? SerializeCreation(data->mPlayerCreatureKey) : std::string{};
-            CoopNet::SubmitEditorClose(saved.empty() ? (gPendingSpecies.empty() ? gLastLocalSpecies : gPendingSpecies) : saved);
+            if (CoopEditor::ValidBudget(gLastEditorBudget))
+                CoopNet::SubmitEditorClose(saved.empty() ? (gPendingSpecies.empty() ? gLastLocalSpecies : gPendingSpecies) : saved,gLastEditorBudget);
             gPendingSpeciesSequence=0; gPendingSpecies.clear();
             gJoinedPlayerPlaced=false;
             gWorldCoordinates = CoopWorld::Coordinates{};
@@ -3107,7 +3158,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Protocol 4: verified world-growth coordinates and shared object interactions enabled."
+            ? "Protocol 5: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."

@@ -1,8 +1,8 @@
-# spore multiplayer mod beta 3
+# spore multiplayer mod beta 4
 
 SporeCoop is an experimental local co-op mod for SPORE. It is designed to let two SPORE instances on the same PC share a game session, with a future LAN/Radmin VPN mode planned for remote players.
 
-The project is currently **Beta 3** (protocol 4), an experimental prerelease. Update both game DLLs and the session server together: Beta 1/protocol 3 cannot join this build. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes, validation and installation.
+The project is currently **Beta 4** (protocol 5), an experimental prerelease. Update both game DLLs and the session server together: Beta 1–3 cannot join this build. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes, validation and installation.
 
 Beta 2 adds native articulated-body movement, growth-aware world coordinates,
 shared object interactions and NPC interpolation. Cell progress now invokes
@@ -12,14 +12,19 @@ use revisioned synchronisation. The latest fix resets those revisions for a new
 invitation, preventing endless rejected edits after an earlier session. The
 remaining player receives a host-left message when the host exits or crashes.
 
-Beta 3 applies the price difference of received editor changes to the native
-DNA budget, including refunds and symmetric pairs. It adds 75 ms interpolation
-for the other player's position and full rotation, plus experimental mouth
-animation playback on the peer and the guest's appearance proxy.
+Beta 4 fixes the Beta 3 pricing regression that blocked shared editor model
+loading. The native DNA balance now travels with each model revision instead
+of being reconstructed from part properties. Both the initial body and later
+edits use this model/budget pair, with budget rebasing for concurrent edits.
 
-The latest two-window screenshot shows matching edited creatures but different
-DNA balances (16 and 6), which prompted this fix. Automated regressions pass;
-the Beta 3 changes still need an interactive two-window gameplay retest.
+Mouth playback now targets the visible AnimatedCreature objects, including
+PlayerCreature and RandomCreature attachments skipped by the previous native
+animation call. The sender also reads actual mouth animation groups from the
+visible model. Beta 3's 75 ms player interpolation is retained.
+
+The Beta 3 failure was confirmed in the game log. Beta 4 builds and automated
+regressions pass. An interactive two-window retest was started but stopped by
+the user with Escape; editor/DNA and mouth behavior still need in-game validation.
 
 ## What the mod is for
 
@@ -35,7 +40,7 @@ Current experimental goals include:
 - running two isolated SPORE profiles and two ModAPI instances on one PC;
 - providing diagnostic console commands such as `coopStatus`, `coopSpawn`, and `coopJoin`.
 
-## Beta 3 limitations
+## Beta 4 limitations
 
 This version has not been validated across every SPORE stage. The protocol and server are tested automatically, but the tests do not drive the SPORE game engine. Creature-stage transitions, tutorials, quests, editor transitions, and unusual save states may still cause crashes or incomplete synchronisation. Remote play over Radmin VPN/ZeroTier/Hamachi is prepared at the protocol level, but complete world transfer and reliable cross-machine testing are not finished.
 

@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 4, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 5, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -175,7 +175,7 @@ try {
   await failure(host, { type: 'appearance', sequence: 1, modelInstance: 123, modelType: 0x2b978c46, modelGroup: -1, appearance: fullAppearance }, 'Invalid modelGroup');
   await host.request({ type: 'appearance', sequence: 1, modelInstance: 123, modelType: 0x2b978c46, modelGroup: 0, appearance: fullAppearance }, m => m.type === 'appearance' && m.sequence === 1);
   check(true, 'Rejected appearance does not consume its sequence');
-  await failure(guest, { type: 'editorOpen', editorId: 12345 }, 'Invitation must be accepted');
+  await failure(guest, { type: 'editorOpen', editorBudget:16, editorId: 12345 }, 'Invitation must be accepted');
 
   state = await host.request({ type: 'invite' }, stateMessage(state.revision + 1));
   const invitation = await guest.wait(stateMessage(state.revision));
@@ -282,31 +282,40 @@ try {
     partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false
   }, 'Duplicate');
 
-  state = await host.request({ type: 'editorOpen', editorId: 12345 }, stateMessage(state.revision + 1));
+  state = await host.request({ type: 'editorOpen', editorBudget:16, editorId: 12345 }, stateMessage(state.revision + 1));
   const mirroredEditor = await guest.wait(stateMessage(state.revision));
+  check(state.editorBudget===16 && mirroredEditor.editorBudget===16,
+    'Both editors enter with the same native DNA budget');
   check(state.evolving && mirroredEditor.evolving && state.editorId === 12345,
     'Opening an editor mirrors its shared editor state');
   const liveSpecies = Buffer.from('live-editor-model-v1').toString('base64');
   const liveOnGuest = await host.request({
-    type: 'speciesLive', sequence: 0, baseSequence: state.speciesSequence, species: liveSpecies
+    type: 'speciesLive', editorBudget:6, sequence: 0, baseSequence: state.speciesSequence, species: liveSpecies
   }, m => m.type === 'speciesLive' && m.role === 'host');
   const liveOnHost = await guest.wait(m => m.type === 'speciesLive' && m.role === 'host');
+  check(liveOnGuest.editorBudget===6 && liveOnHost.editorBudget===6,
+    'A ten-DNA purchase broadcasts model and remaining DNA in the same revision');
   check(liveOnGuest.species === liveSpecies && liveOnHost.species === liveSpecies,
     'Live creature edits are broadcast byte-for-byte');
-  const staleEditor=await guest.request({type:'speciesLive',sequence:0,baseSequence:0,species:Buffer.from('stale').toString('base64')},m=>m.type==='speciesConflict');
+  const staleEditor=await guest.request({type:'speciesLive',editorBudget:6,sequence:0,baseSequence:0,species:Buffer.from('stale').toString('base64')},m=>m.type==='speciesConflict');
   check(staleEditor.species===liveSpecies && staleEditor.clientSequence===0,'Stale editor updates return the current model instead of overwriting the peer');
+  check(staleEditor.editorBudget===6,'A stale concurrent edit receives the authoritative budget for rebasing');
   const nextEdit=Buffer.from('guest-added-mouth').toString('base64');
-  const edited=await guest.request({type:'speciesLive',sequence:1,baseSequence:staleEditor.sequence,species:nextEdit},m=>m.type==='speciesLive'&&m.role==='guest');
-  check(edited.species===nextEdit && edited.clientSequence===1,'Edits from player two are acknowledged and broadcast to player one');
+  const edited=await guest.request({type:'speciesLive',editorBudget:6,sequence:1,baseSequence:staleEditor.sequence,species:nextEdit},m=>m.type==='speciesLive'&&m.role==='guest');
+  check(edited.editorBudget===6 && edited.species===nextEdit && edited.clientSequence===1,'Edits from player two are acknowledged and broadcast to player one');
+  const refunded=await guest.request({type:'speciesLive',editorBudget:16,sequence:2,baseSequence:edited.sequence,species:liveSpecies},m=>m.type==='speciesLive'&&m.clientSequence===2);
+  check(refunded.editorBudget===16 && refunded.species===liveSpecies,'Undo returns both the old model and its refunded budget');
+  await failure(guest,{type:'speciesLive',editorBudget:-4,sequence:3,baseSequence:refunded.sequence,species:liveSpecies},'editorBudget');
   const finalLiveSpecies = Buffer.from('live-editor-model-v2').toString('base64');
-  state = await guest.request({ type: 'editorClose', species: finalLiveSpecies }, stateMessage(state.revision + 1));
+  state = await guest.request({ type: 'editorClose', editorBudget:6, species: finalLiveSpecies }, stateMessage(state.revision + 1));
   const editorClosedHost = await host.wait(stateMessage(state.revision));
+  check(state.editorBudget===6 && editorClosedHost.editorBudget===6,'Final editor snapshot retains the submitted budget');
   check(!state.evolving && !editorClosedHost.evolving && state.species === finalLiveSpecies,
     'Either player can finish the mirrored editor with the same creature');
 
-  state = await host.request({ type: 'editorOpen', editorId: 54321 }, stateMessage(state.revision + 1));
+  state = await host.request({ type: 'editorOpen', editorBudget:16, editorId: 54321 }, stateMessage(state.revision + 1));
   await guest.wait(stateMessage(state.revision));
-  state = await guest.request({ type: 'editorClose', species: '' }, stateMessage(state.revision + 1));
+  state = await guest.request({ type: 'editorClose', editorBudget:6, species: '' }, stateMessage(state.revision + 1));
   await host.wait(stateMessage(state.revision));
   check(!state.evolving && state.species === '',
     'An empty final editor snapshot unlocks the world without erasing the last valid creature');
