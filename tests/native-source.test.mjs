@@ -21,7 +21,7 @@ function body(source, signature, nextSignature) {
   return source.slice(start, end);
 }
 
-const updateRemote = body(probe, 'void UpdateRemoteCell(', 'std::string Base64Encode(');
+const updateRemote = body(probe, 'void UpdateRemoteCell(', 'void RemoveHostAppearanceProxy(');
 const updateStability = body(probe, 'bool UpdateLocalCellStability(', 'void SubmitLocalAppearance(');
 const submitAppearance = body(probe, 'void SubmitLocalAppearance(', 'void ApplyRemoteAppearance(');
 const applyRemoteAppearance = body(probe, 'void ApplyRemoteAppearance(', 'void UpdateRemoteCell(');
@@ -29,8 +29,27 @@ const coopUpdate = body(probe, 'void CoopUpdate()', 'void Spawn()');
 const inviteUI = body(probe, 'void UpdateInviteUI(', 'void CoopUpdate()');
 const validateSavedWorld = body(probe, 'bool ValidateIncomingSavedWorld(', 'bool FindNewestSavedGame(');
 const sharedEditor = body(probe, 'void UpdateSharedEditor(', 'constexpr uint32_t kInviteButtonID');
+const serializeEditor = body(probe, 'std::string SerializeEditorModel()', 'bool ApplyEditorModel(');
+assert.match(serializeEditor,/HistorySlot[\s\S]*SerializeEditorResource\(editor->mEditHistory\[index\]\.get\(\)\)/,
+  'Publishing must read the completed native edit transaction, including undo/redo');
+assert.match(sharedEditor,/if \(editorActive && gEditorInitialModelPending\)[\s\S]*!ApplyEditorModel\(snapshot.speciesBlob\)[\s\S]*gAppliedSpeciesSequence = snapshot.speciesSequence/,
+  'A mirrored entry is not acknowledged until the shared body is actually applied');
+assert.doesNotMatch(serializeEditor,/mpActiveHandle/,
+  'A hovered handle must not block publication of a committed edit');
 const stateHandler = body(net, 'if (type == "state")', 'if (type == "editorOpen")');
 const readPose = body(probe, 'CoopNet::CellPose ReadPlayerRenderPose(', 'CoopNet::CellProgress ReadCellProgress(');
+assert.doesNotMatch(probe, /field_112\s*=\s*true/,
+  'field_112 enables native death animation and cell_death_continuous, not collision isolation');
+assert.doesNotMatch(probe, /HideReplicaDustEffect/,
+  'Hiding FC1CD6A3 did not remove the native continuous death effect');
+const initializeReplica = body(probe, 'bool InitializeReplica(', 'Simulator::cObjectPoolIndex CreateCellFromResource(');
+assert.match(initializeReplica, /cell->Index\(\) == game->mAvatarCellIndex/,
+  'Replica initialization must reject the real local avatar');
+assert.match(initializeReplica, /unregister\(broadphase, collisionHandle\);\s*cell->field_364 = -1/,
+  'Replica collider must be unlinked before clearing its handle to avoid a ghost collider');
+const createReplica = body(probe, 'Simulator::cObjectPoolIndex CreateCellFromResource(', 'Simulator::cObjectPoolIndex CreatePlayerCellClone(');
+assert.match(createReplica, /InitializeReplica\(cell, interactive\)[\s\S]*DestroyCell\(index\)/,
+  'Unisolated synthetic bodies must not remain alive after failed initialization');
 assert.doesNotMatch(readPose, /GetModel\(\)|model &&/,
   'Cells rendered through structure attachments must still publish visible movement');
 assert.doesNotMatch(probe, /mCells\.DeleteObject\(/,
@@ -42,7 +61,7 @@ assert.match(probe, /GetRemoveCellFunction\(\)[\s\S]*MatchesRemovalAbi/,
 
 assert.match(net, /std::uint64_t gSpeciesSequence = 1;/,
   'The first appearance sequence must be newer than the zero-initialized receiver state');
-assert.match(net, /constexpr int kProtocol = 3;/,
+assert.match(net, /constexpr int kProtocol = 4;/,
   'The native client must reject older incompatible protocol builds');
 assert.doesNotMatch(updateRemote,
   /ResourceKey\(snapshot\.remoteModelInstance[\s\S]*snapshot\.remoteModelGroup\)/,
@@ -74,10 +93,26 @@ assert.doesNotMatch(validateSavedWorld, /CopyFile|copy_file|CopyDirectoryTree/,
   'The injected DLL must not rewrite a live SPORE save while either game is running');
 assert.match(coopUpdate, /snapshot\.inviteFrom != CoopNet::GetRole\(\)[\s\S]*JoinSavedWorld\(\)/,
   'The invitation recipient must load the prepared world from either inviter role');
-assert.match(updateRemote, /CoopVisual::SharedSize\(owner[\s\S]*player->mTargetSize = sharedSize\.target/,
-  'The invited player must adopt the world owner size without changing owner growth');
-assert.match(updateRemote, /player->mTransform\.SetScale/,
-  'The local player scale must catch up when the peer grows first');
+assert.doesNotMatch(updateRemote, /player->mTransform\.SetScale|player->mTargetSize =/,
+  'Native avatar growth must retain engine ownership of its physical scale');
+assert.match(probe, /gWorldCoordinates\.Rebase/,'World rebasing must preserve network coordinates');
+assert.match(probe, /LocalWorldSnapshot\(CoopNet::GetSnapshot\(\)\)/,'Incoming objects use local coordinates after growth');
+const moveBody = body(probe, 'bool MoveCellBody(', 'void DestroyCell(');
+const frameHook = body(probe, 'void __cdecl CellGraphicsUpdateHook()', 'std::string Base64Encode(');
+assert.match(moveBody, /functions\.position\(cell, &position\)[\s\S]*functions\.orientation\(cell, &orientation\)/,
+  'Position and orientation must move the physical body through verified native setters');
+assert.doesNotMatch(probe, /(?:player|remote|proxy|cell)->mTransform\.SetOffset\(/,
+  'Direct cell translations leave articulated physics nodes behind');
+assert.match(probe, /MoveCellBody\(proxy, position, player->mTransform\.GetRotation\(\)\.ToQuaternion\(\)\)/,
+  'The guest appearance body must follow the native input body');
+assert.match(coopUpdate, /MoveCellBody\(player, spawn,/,
+  'Join placement must move the physical player together with its camera target');
+assert.match(frameHook, /MoveCellBody\(remote,[\s\S]*gCellGraphicsUpdateOriginal\(\);[\s\S]*ReadVisualPosition\(remote\)/,
+  'Final authoritative movement must precede graphics, and diagnostics must read real graphics afterward');
+assert.doesNotMatch(frameHook, /CreatePlayerCellClone\(|DestroyCell\(|UpdateRemoteCell\(/,
+  'The graphics boundary must never spawn or delete cells');
+assert.match(probe, /MatchesMotionCode[\s\S]*kPositionRelocations/,
+  'Native movement must validate executable code with ASLR relocation support');
 assert.doesNotMatch(probe, /g(?:RemoteCell|HostAppearanceProxy)Index\s*[<>]=?\s*0/,
   'Signed pool handles must never be rejected merely because their sign bit is set');
 assert.match(applyRemoteAppearance,
@@ -93,7 +128,7 @@ assert.match(coopUpdate, /gLocalPlayerHiddenByProxy \? 1\.0f : player->mOpacity,
   'The hidden guest avatar must still publish a visible complete body to the host');
 assert.match(probe, /void UpdateMirroredNpcs\([\s\S]*DeleteGuestLocalNpcs\(player\)[\s\S]*CreateCellFromResource/,
   'The joining window must replace local random NPCs with full authoritative owner cells');
-assert.match(coopUpdate, /IsWorldOwner\(snapshot, CoopNet::GetRole\(\)\)[\s\S]*SubmitNpcSnapshot\(ReadAuthoritativeNpcs\(player\)\)/,
+assert.match(coopUpdate, /IsWorldOwner\(snapshot, CoopNet::GetRole\(\)\)[\s\S]*SubmitNpcSnapshot\(ReadAuthoritativeNpcs\(player\),gWorldActionApplied\)/,
   'Only the world owner must publish the shared NPC population');
 assert.match(updateStability, /gLastSubmittedAppearanceKey = ResourceKey\{\}/,
   'Growth must force the rebuilt local cell appearance to be resubmitted');

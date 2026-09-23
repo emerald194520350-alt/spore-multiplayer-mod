@@ -20,6 +20,19 @@ $documentsPath = [Environment]::GetFolderPath('MyDocuments')
 $primaryCreations = Join-Path $documentsPath 'My Spore Creations'
 $secondCreations = Join-Path $documentsPath 'My Spore Creations Coop 2'
 
+function Assert-IsolatedReplacementPath([string]$Path, [string]$Parent, [string]$Name) {
+    $expected = [IO.Path]::GetFullPath((Join-Path $Parent $Name)).TrimEnd('\')
+    $actual = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath.TrimEnd('\')
+    if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to replace an unexpected profile path: $actual"
+    }
+    foreach ($candidate in @($Path, $Parent)) {
+        if ((Get-Item -LiteralPath $candidate -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to replace a linked profile directory: $candidate"
+        }
+    }
+}
+
 # Refuse to mix a running DLL with an updated server or partially install DLLs.
 $runningGames = @(Get-Process -Name SporeApp -ErrorAction SilentlyContinue)
 if ($runningGames.Count -gt 0) {
@@ -99,19 +112,20 @@ if ($instances.Count -eq 0) {
     }
 
     if (Test-Path -LiteralPath $primaryProfile) {
+        $backupStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
         if (-not (Test-Path -LiteralPath $secondProfile)) {
             New-Item -ItemType Directory -Path $secondProfile -Force | Out-Null
         }
         $primaryGames = Join-Path $primaryProfile 'Games'
         $secondGames = Join-Path $secondProfile 'Games'
         if (Test-Path -LiteralPath $primaryGames) {
-            $backupStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
             # Copying into an existing Games directory leaves files belonging to
             # the guest's old creature behind.  That produced a black local
             # creature in one window and the host creature in the other. Keep a
             # recoverable backup, then replace the isolated profile's Games
             # directory as one complete world before either instance starts.
             if (Test-Path -LiteralPath $secondGames) {
+                Assert-IsolatedReplacementPath $secondGames $secondProfile 'Games'
                 $backupGames = Join-Path $env:LOCALAPPDATA "SporeCoop\Backups\Launch-$backupStamp\SporeCoop2\Games"
                 New-Item -ItemType Directory -Path (Split-Path -Parent $backupGames) -Force | Out-Null
                 Copy-Item -LiteralPath $secondGames -Destination $backupGames -Recurse -Force
@@ -135,6 +149,7 @@ if ($instances.Count -eq 0) {
         # otherwise SPORE resolves the same world to its previous local model.
         if (Test-Path -LiteralPath $primaryCreations) {
             if (Test-Path -LiteralPath $secondCreations) {
+                Assert-IsolatedReplacementPath $secondCreations $documentsPath 'My Spore Creations Coop 2'
                 $creationBackup = Join-Path $env:LOCALAPPDATA "SporeCoop\Backups\Launch-$backupStamp\My Spore Creations Coop 2"
                 New-Item -ItemType Directory -Path (Split-Path -Parent $creationBackup) -Force | Out-Null
                 Copy-Item -LiteralPath $secondCreations -Destination $creationBackup -Recurse -Force

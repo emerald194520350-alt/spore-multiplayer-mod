@@ -43,6 +43,18 @@ namespace CoopNet
         float opacity = 1;
         int stageScale = 0;
         std::uint32_t modelInstance = 0, modelType = 0, modelGroup = 0;
+        int health = 6;
+        std::uint32_t animation = 0;
+        bool dead = false;
+        float elevation = 0;
+    };
+
+    struct WorldAction
+    {
+        std::uint64_t sequence = 0;
+        std::uint32_t id = 0, resource = 0;
+        int damage = 0;
+        bool removed = false, effects = false;
     };
 
     struct Snapshot
@@ -51,6 +63,8 @@ namespace CoopNet
         bool connected = false;
         std::uint64_t connectionGeneration = 0;
         std::string lastError;
+        bool sessionEnded = false;
+        std::string disconnectReason;
         // A TCP connection alone is not permission to spawn a player clone.
         // This is set only when the session-state snapshot contains the other role.
         bool remotePeerConnected = false;
@@ -78,6 +92,7 @@ namespace CoopNet
         std::uint64_t npcSequence = 0;
         std::uint64_t npcReceivedTick = 0;
         std::vector<NpcState> remoteNpcs;
+        std::uint64_t worldActionAck = 0;
 
         bool invitePending = false;
         bool inviteAccepted = false;
@@ -96,12 +111,15 @@ namespace CoopNet
         std::uint32_t editorID = 0;
         std::string editorRole;
         std::uint64_t speciesSequence = 0;
+        std::uint64_t speciesAck = 0;
+        bool speciesConflict = false;
         std::string speciesBlob;
     };
 
     bool StartFromEnvironment();
     void Stop();
     Snapshot GetSnapshot();
+    void AcknowledgeSessionEnd();
     const char* GetRole();
 
     void SubmitPosition(float x, float y, float z,
@@ -113,11 +131,13 @@ namespace CoopNet
     void SubmitInvite();
     void SubmitInviteResponse(bool accepted);
     void SubmitHostPause(bool paused);
-    void SubmitNpcSnapshot(const std::vector<NpcState>& npcs);
+    void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck = 0);
+    std::uint64_t SubmitWorldAction(WorldAction action);
+    std::vector<WorldAction> TakeWorldActions();
     void SeedProgress(const CellProgress& progress);
     void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
         const std::array<int, 13>& absoluteUnlocks);
-    void SubmitEditorOpen(std::uint32_t editorID);
+    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies = {});
     void SubmitEditorClose(const std::string& speciesBlob);
-    void SubmitSpecies(const std::string& speciesBlob);
+    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence);
 }

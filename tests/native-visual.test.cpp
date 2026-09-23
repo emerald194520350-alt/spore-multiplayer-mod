@@ -7,6 +7,8 @@
 #include "../native/UiGraphicsAbi.h"
 #include <stdexcept>
 #include <iostream>
+#include "engine-motion.test.h"
+#include "shared-world.test.h"
 
 namespace
 {
@@ -50,6 +52,12 @@ int main(int argc, char** argv)
 {
     try
     {
+        if (argc == 3 && std::string(argv[1]) == "--engine-motion")
+        {
+            std::cout << "PASS: " << TestEngineMotion(argv[2])
+                << " engine movement/collision checks, including 1000 frames using native setters. No game session was started.\n";
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--idle")
         {
             Check(CoopNet::StartFromEnvironment(), "Native client starts");
@@ -67,6 +75,7 @@ int main(int argc, char** argv)
             std::cout << "PASS: native client stayed connected for 17 seconds without gameplay.\n";
             return 0;
         }
+        Check(TestSharedWorld(),"Shared world coordinates, editor rebase and mission increments");
         NativeGraphicsFixture graphics;
         unsigned char removeCode[CoopEngine::kRemoveCellCodeSize]{};
         const unsigned char removePrologue[] = {0x8b,0x0d,0x04,0x3c,0x6b,0x01,0x83,0xec,0x10,0x55,0x8b,0x6c,0x24,0x18,0x83,0xc1,0x1c,0x55,0xe8,0x29,0xa2,0xcf,0xff};
@@ -259,7 +268,7 @@ int main(int argc, char** argv)
         Check(gSnapshot.progressAckSequence == 3 && gSnapshot.revision == 8 && gSnapshot.progress.food == 12 && gSnapshot.worldGeneration == 42,
             "Native snapshots publish progress and the local role's acknowledgement together");
         HandleMessage("{\"type\":\"npcSnapshot\",\"role\":\"guest\",\"sequence\":0,"
-            "\"npcs\":[2147483649,123456,12,34,0,0,1,0.55,0.55,1,0,4275878552,731479110,0]}");
+            "\"npcs\":[2147483649,123456,12,34,0,0,1,0.55,0.55,1,0,4275878552,731479110,0,6,0,0,0]}");
         Check(gSnapshot.npcReceivedTick != 0 && gSnapshot.npcSequence == 0 &&
             gSnapshot.remoteNpcs.size() == 1 &&
             gSnapshot.remoteNpcs[0].id == 0x80000001u &&
@@ -278,9 +287,33 @@ int main(int argc, char** argv)
             !gSnapshot.inviteAccepted && !gSnapshot.hostPaused && !gSnapshot.editorOpen && gOutgoing.empty(),
             "Disconnect clears peer and NPC visuals, editor, invite, pause and queued actions");
         gSnapshot.hostPaused = true;
-        HandleMessage("{\"type\":\"welcome\",\"protocol\":3,\"role\":\"host\"}");
+        HandleMessage("{\"type\":\"welcome\",\"protocol\":4,\"role\":\"host\"}");
         Check(!gSnapshot.hostPaused && !gSnapshot.inviteAccepted,
             "A fresh handshake cannot retain the previous world's pause");
+        HandleMessage("{\"type\":\"state\",\"worldGeneration\":50,\"speciesSequence\":20,\"species\":\"old-campaign\"}");
+        gSnapshot.speciesAck = 200;
+        gSnapshot.speciesConflict = true;
+        HandleMessage("{\"type\":\"state\",\"worldGeneration\":51,\"speciesSequence\":0,\"species\":\"\"}");
+        Check(gSnapshot.speciesSequence == 0 && gSnapshot.speciesBlob.empty() &&
+            gSnapshot.speciesAck == 0 && !gSnapshot.speciesConflict,
+            "A new invitation resets editor revisions and acknowledgements from the previous campaign");
+        HandleMessage("{\"type\":\"state\",\"worldGeneration\":51,\"evolving\":true,\"speciesSequence\":1,\"species\":\"shared-entry\"}");
+        Check(gSnapshot.speciesSequence == 1 && gSnapshot.speciesBlob == "shared-entry",
+            "The new editor's initial body is accepted even after a higher revision in a previous campaign");
+        HandleMessage("{\"type\":\"speciesLive\",\"role\":\"host\",\"sequence\":2,\"clientSequence\":201,\"species\":\"body-with-spikes\"}");
+        Check(gSnapshot.speciesSequence == 2 && gSnapshot.speciesBlob == "body-with-spikes" &&
+            gSnapshot.speciesAck == 201 && !gSnapshot.speciesConflict,
+            "A committed spike edit advances the shared revision and acknowledges the local transaction");
+        HandleMessage("{\"type\":\"state\",\"worldGeneration\":51,\"speciesSequence\":1,\"species\":\"shared-entry\"}");
+        Check(gSnapshot.speciesSequence == 2 && gSnapshot.speciesBlob == "body-with-spikes",
+            "An older snapshot in the same campaign cannot undo a newer live edit");
+        gSnapshot.sessionEnded = false;
+        gSnapshot.connected = gSnapshot.inviteAccepted = true;
+        HandleMessage("{\"type\":\"sessionEnded\",\"reason\":\"host_left\"}");
+        MarkDisconnected();
+        Check(gSnapshot.sessionEnded && gSnapshot.disconnectReason == "host_left" &&
+            !gSnapshot.connected && !gSnapshot.inviteAccepted,
+            "TCP teardown preserves the host-left reason and clears active session state");
         std::cout << "PASS: " << checks << " native visual/network assertions. No gameplay was tested.\n";
         return 0;
     }

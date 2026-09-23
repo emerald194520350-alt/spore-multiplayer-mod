@@ -11,7 +11,8 @@ namespace CoopProgress
         for (size_t i = 0; i < into.unlocks.size(); ++i)
             into.unlocks[i] = std::max(into.unlocks[i], from.unlocks[i]);
         for (size_t i = 0; i < into.missions.size(); ++i)
-            into.missions[i] = std::max(into.missions[i], from.missions[i]);
+            if (i % 4 == 0 || i % 4 == 3)
+                into.missions[i] = std::max(into.missions[i], from.missions[i]);
         into.playerHasMoved |= from.playerHasMoved;
         into.playerHasEaten |= from.playerHasEaten;
         into.partCinematicPlayed |= from.partCinematicPlayed;
@@ -36,13 +37,16 @@ namespace CoopProgress
         std::deque<Event> pending;
     public:
         bool IsInitialized() const { return initialized; }
+        // Native replay may set local presentation flags. They are already
+        // applied state, not another pickup to send back to the session.
+        void ObserveApplied(const CoopNet::CellProgress& value) { baseline = value; }
         void Reset() { *this = Reconciler{}; }
         void Initialize(const CoopNet::CellProgress& value)
         {
             initialized = true;
             baseline = value;
         }
-        bool Capture(const CoopNet::CellProgress& current, Event& event)
+        bool Capture(const CoopNet::CellProgress& current, Event& event, bool ownsSharedSpend = true)
         {
             if (!initialized) return false;
             auto& d = event.delta;
@@ -51,11 +55,20 @@ namespace CoopProgress
             d.plantFood = std::max(0, current.plantFood - baseline.plantFood);
             d.overPlantFood = std::max(0, current.overPlantFood - baseline.overPlantFood);
             d.overAnimalFood = std::max(0, current.overAnimalFood - baseline.overAnimalFood);
-            d.spent = current.spent - baseline.spent;
+            // Both native editors save the same final body. Charge that shared
+            // purchase once, from the world owner's native budget calculation.
+            d.spent = ownsSharedSpend ? current.spent - baseline.spent : 0;
             d.killCount = std::max(0, current.killCount - baseline.killCount);
+            bool missionProgress = false;
+            for (size_t i = 0; i < d.missions.size(); ++i)
+                if (i % 4 == 1 || i % 4 == 2)
+                {
+                    d.missions[i] = std::max(0,current.missions[i]-baseline.missions[i]);
+                    missionProgress |= d.missions[i] != 0;
+                }
             auto merged = baseline;
             MergeMilestones(merged, current);
-            const bool changed = d.food || d.plantFood || d.overPlantFood ||
+            const bool changed = missionProgress || d.food || d.plantFood || d.overPlantFood ||
                 d.overAnimalFood || d.spent || d.killCount ||
                 merged.unlocks != baseline.unlocks || merged.missions != baseline.missions ||
                 merged.playerHasMoved != baseline.playerHasMoved ||
@@ -84,6 +97,8 @@ namespace CoopProgress
                 value.overAnimalFood += d.overAnimalFood;
                 value.spent = std::max(0, value.spent + d.spent);
                 value.killCount += d.killCount;
+                for (size_t i = 0; i < value.missions.size(); ++i)
+                    if (i % 4 == 1 || i % 4 == 2) value.missions[i] += d.missions[i];
                 MergeMilestones(value, d);
             }
             baseline = value;

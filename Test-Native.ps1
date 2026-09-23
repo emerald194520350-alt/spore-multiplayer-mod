@@ -1,3 +1,4 @@
+param([string]$GameExecutable)
 $ErrorActionPreference = 'Stop'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere)) { throw 'Visual Studio Build Tools are required.' }
@@ -7,3 +8,7 @@ if (-not $msbuild) { throw 'Visual Studio C++ build tools are required.' }
 if ($LASTEXITCODE -ne 0) { throw 'Native test build failed.' }
 & (Join-Path $PSScriptRoot 'bin\tests\NativeVisualTests.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Native visual/network tests failed.' }
+if ($GameExecutable) {
+    & (Join-Path $PSScriptRoot 'bin\tests\NativeVisualTests.exe') --engine-motion $GameExecutable
+    if ($LASTEXITCODE -ne 0) { throw 'Native engine movement regression tests failed.' }
+}

@@ -24,6 +24,7 @@ namespace SporeCoop
         public string Appearance = "";
         public long AppearanceModelInstance, AppearanceModelType, AppearanceModelGroup;
         public long NpcSequence = -1;
+        public long WorldActionSequence;
         public readonly object SendLock = new object();
     }
 
@@ -74,7 +75,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 3;
+        const int Protocol = 4;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -84,6 +85,8 @@ namespace SporeCoop
         Session State;
         Proposal Pending;
         int Connections;
+        readonly Dictionary<uint, double[]> WorldObjects = new Dictionary<uint, double[]>();
+        readonly HashSet<uint> RemovedObjects = new HashSet<uint>();
 
         static JavaScriptSerializer NewJson()
         {
@@ -287,7 +290,7 @@ namespace SporeCoop
             object raw;
             if (!data.TryGetValue(name, out raw) || !(raw is object[]) ||
                 (count >= 0 && ((object[])raw).Length != count) ||
-                (count < 0 && ((object[])raw).Length > 48 * 14))
+                (count < 0 && ((object[])raw).Length > 4094 * 18))
                 throw new ArgumentException("Invalid " + name);
             var values = (object[])raw;
             var result = new double[values.Length];
@@ -456,9 +459,9 @@ namespace SporeCoop
                 // the full ID range. Per-field limits below still constrain
                 // coordinates, rotations and sizes.
                 var npcs = NumberArray(data, "npcs", -1, uint.MaxValue);
-                if (npcs.Length % 14 != 0) throw new ArgumentException("Invalid npcs");
+                if (npcs.Length % 18 != 0) throw new ArgumentException("Invalid npcs");
                 var ids = new HashSet<uint>();
-                for (int i = 0; i < npcs.Length; i += 14)
+                for (int i = 0; i < npcs.Length; i += 18)
                 {
                     if (npcs[i] < 0 || npcs[i] > uint.MaxValue || npcs[i] != Math.Floor(npcs[i]) ||
                         npcs[i + 1] <= 0 || npcs[i + 1] > uint.MaxValue || npcs[i + 1] != Math.Floor(npcs[i + 1]) ||
@@ -466,7 +469,7 @@ namespace SporeCoop
                         Math.Abs(npcs[i + 4]) > 1000000 || Math.Abs(npcs[i + 5]) > 1 ||
                         Math.Abs(npcs[i + 6]) > 1 ||
                         npcs[i + 7] < 0.001 || npcs[i + 7] > 100000 ||
-                        npcs[i + 8] < 0.001 || npcs[i + 8] > 100000 ||
+                        npcs[i + 8] < 0 || npcs[i + 8] > 100000 ||
                         npcs[i + 9] < 0 || npcs[i + 9] > 1 ||
                         npcs[i + 10] < -1 || npcs[i + 10] > 19 || npcs[i + 10] != Math.Floor(npcs[i + 10]))
                         throw new ArgumentException("Invalid npcs");
@@ -477,12 +480,42 @@ namespace SporeCoop
                         if (npcs[i + field] < 0 || npcs[i + field] > uint.MaxValue ||
                             npcs[i + field] != Math.Floor(npcs[i + field]))
                             throw new ArgumentException("Invalid npcs");
-                    if (npcs[i + 11] == 0 || !ids.Add((uint)npcs[i]))
+                    if (!ids.Add((uint)npcs[i]) ||
+                        npcs[i+14] < 0 || npcs[i+14] > 1000000 || npcs[i+14] != Math.Floor(npcs[i+14]) ||
+                        npcs[i+15] < 0 || npcs[i+15] > 125 || npcs[i+15] != Math.Floor(npcs[i+15]) ||
+                        (npcs[i+16] != 0 && npcs[i+16] != 1) || Math.Abs(npcs[i+17]) > 1000000)
                         throw new ArgumentException("Invalid npcs");
                 }
+                long actionAck = Integer(data,"actionAck",0,long.MaxValue);
+                WorldObjects.Clear();
+                for (int i=0;i<npcs.Length;i+=18) { var item=new double[18]; Array.Copy(npcs,i,item,0,18); WorldObjects[(uint)npcs[i]]=item; }
+                RemovedObjects.RemoveWhere(id => !WorldObjects.ContainsKey(id));
                 peer.NpcSequence = sequence;
                 Broadcast(new { type = "npcSnapshot", role = peer.Role,
-                    sequence = sequence, npcs = npcs });
+                    sequence = sequence, actionAck = actionAck, npcs = npcs });
+                return;
+            }
+            if (type == "worldAction")
+            {
+                if (!State.InviteAccepted || State.Evolving || peer.Role == State.InviteFrom)
+                    throw new ArgumentException("Joined world interaction required");
+                if (Integer(data,"worldGeneration",0,long.MaxValue) != State.WorldGeneration)
+                    throw new ArgumentException("Stale world generation");
+                long sequence=Integer(data,"sequence",1,long.MaxValue);
+                if (sequence<=peer.WorldActionSequence) throw new ArgumentException("Stale world action");
+                uint id=(uint)Integer(data,"id",0,uint.MaxValue);
+                long resource=Integer(data,"resource",1,uint.MaxValue);
+                int damage=(int)Integer(data,"damage",0,1000000);
+                bool removed=Boolean(data,"removed"), effects=Boolean(data,"effects");
+                double[] item;
+                // A disappeared owner object is a completed action, not a reason
+                // to strand the guest's pending tombstone. Forward a no-op ack.
+                if (!WorldObjects.TryGetValue(id,out item) || item[1]!=resource || RemovedObjects.Contains(id))
+                { damage=0; removed=false; effects=false; }
+                else if (removed) RemovedObjects.Add(id);
+                peer.WorldActionSequence=sequence;
+                Broadcast(new { type="worldAction",role=peer.Role,sequence=sequence,id=id,
+                    resource=resource,damage=damage,removed=removed,effects=effects });
                 return;
             }
             if (type == "hostPause")
@@ -506,6 +539,7 @@ namespace SporeCoop
                 State.InviteAccepted = false;
                 State.InviteFrom = peer.Role;
                 ++State.WorldGeneration;
+                WorldObjects.Clear(); RemovedObjects.Clear();
                 State.HostPaused = false;
                 // A new invitation selects a new authoritative saved world.
                 // Its cell tutorial state must be seeded by that world's owner,
@@ -521,6 +555,7 @@ namespace SporeCoop
                 State.KillCount = 0;
                 State.PlayerHasMoved = State.PlayerHasEaten = false;
                 State.PartCinematicPlayed = State.ShowMateButton = State.FirstEditorEntry = false;
+                State.Species=""; State.SpeciesSequence=0;
                 Changed();
                 return;
             }
@@ -595,7 +630,11 @@ namespace SporeCoop
                 for (int i = 0; i < 13; i++)
                     State.CellUnlocks[i] = Math.Max(State.CellUnlocks[i], unlocks[i]);
                 for (int i = 0; i < 24; i++)
-                    State.CellMissions[i] = Math.Max(State.CellMissions[i], missions[i]);
+                {
+                    long value=(i%4==1 || i%4==2) ? (long)State.CellMissions[i]+missions[i] : Math.Max(State.CellMissions[i],missions[i]);
+                    if(value>100000000) throw new ArgumentException("Shared mission overflow");
+                    State.CellMissions[i]=(int)value;
+                }
                 State.KillCount = (int)nextKills;
                 State.PlayerHasMoved |= playerHasMoved;
                 State.PlayerHasEaten |= playerHasEaten;
@@ -612,16 +651,19 @@ namespace SporeCoop
             {
                 if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
                 long editorId = Integer(data, "editorId", 0, uint.MaxValue);
+                string initial=data.ContainsKey("species") ? Text(data,"species",350000) : "";
+                ValidateBlob(initial);
                 if (!State.Evolving)
                 {
                     State.Evolving = true;
                     State.Editor = peer.Role;
                     State.EditorID = editorId;
+                    State.Species=initial; ++State.SpeciesSequence;
                     Ready.Clear();
                     Pending = null;
                     Changed();
                 }
-                Broadcast(new { type = "editorOpen", role = peer.Role, editorId = editorId,
+                Broadcast(new { type = "editorOpen", role = State.Editor, editorId = State.EditorID,
                     revision = State.Revision });
                 return;
             }
@@ -633,11 +675,18 @@ namespace SporeCoop
                 if (sequence <= peer.EditorSequence) throw new ArgumentException("Stale species sequence");
                 string blob = Text(data, "species", 350000);
                 ValidateBlob(blob);
+                long baseSequence=Integer(data,"baseSequence",0,long.MaxValue);
                 peer.EditorSequence = sequence;
+                if (baseSequence!=State.SpeciesSequence)
+                {
+                    Send(peer,new { type="speciesConflict",role=peer.Role,clientSequence=sequence,
+                        sequence=State.SpeciesSequence,species=State.Species });
+                    return;
+                }
                 State.SpeciesSequence++;
                 State.Species = blob;
                 Broadcast(new { type = "speciesLive", role = peer.Role,
-                    sequence = State.SpeciesSequence, species = blob });
+                    sequence = State.SpeciesSequence, clientSequence = sequence, species = blob });
                 return;
             }
             if (type == "editorClose")
@@ -839,7 +888,9 @@ namespace SporeCoop
                     if (++messages > 120) throw new InvalidDataException("Message rate exceeded");
                     lock (Gate)
                     {
-                        if (Peers[peer.Role] != peer) throw new IOException("Disconnected");
+                        Peer active;
+                        if (!Peers.TryGetValue(peer.Role, out active) || active != peer)
+                            throw new IOException("Disconnected");
                         // Roll back protocol state if persistence fails; never acknowledge an unsaved mutation.
                         string before = Json.Serialize(State);
                         var oldReady = new HashSet<string>(Ready);
@@ -891,6 +942,8 @@ namespace SporeCoop
                     peer.Client.Close();
                     if (peer.Role != null && Peers.ContainsKey(peer.Role) && Peers[peer.Role] == peer)
                     {
+                        bool ownerLeft = peer.Role == "host" ||
+                            (State.InviteAccepted && State.InviteFrom == peer.Role);
                         Peers.Remove(peer.Role);
                         State.Evolving = false;
                         State.Editor = null;
@@ -900,9 +953,16 @@ namespace SporeCoop
                         State.HostPaused = false;
                         Ready.Clear();
                         Pending = null;
-                        if (peer.Role == "host")
+                        if (ownerLeft)
                         {
-                            foreach (var guest in Peers.Values) guest.Client.Close();
+                            foreach (var guest in Peers.Values)
+                            {
+                                // Deliver the reason while the socket is still writable.
+                                // TCP EOF/reset from a crashed host uses this same path.
+                                try { Send(guest, new { type = "sessionEnded", reason = "host_left" }); }
+                                catch (Exception error) { Console.WriteLine("Disconnect notice: " + error.GetType().Name); }
+                                guest.Client.Close();
+                            }
                             Peers.Clear();
                         }
                         try { Changed(); } catch (Exception error) { Console.WriteLine("Save failed: " + error.GetType().Name); }

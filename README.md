@@ -1,8 +1,21 @@
-# spore multiplayer mod beta 1
+# spore multiplayer mod beta 2
 
 SporeCoop is an experimental local co-op mod for SPORE. It is designed to let two SPORE instances on the same PC share a game session, with a future LAN/Radmin VPN mode planned for remote players.
 
-The project is currently **Beta 1** (protocol 3). It is an experimental development and testing build, not a finished release. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes and installation.
+The project is currently **Beta 2** (protocol 4), an experimental prerelease. Update both game DLLs and the session server together: Beta 1/protocol 3 cannot join this build. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes, validation and installation.
+
+Beta 2 adds native articulated-body movement, growth-aware world coordinates,
+shared object interactions and NPC interpolation. Cell progress now invokes
+native growth, part/quest notifications and the first-part cinematic. Both
+editors load the shared species; completed edits, undo/redo and concurrent edits
+use revisioned synchronisation. The latest fix resets those revisions for a new
+invitation, preventing endless rejected edits after an earlier session. The
+remaining player receives a host-left message when the host exits or crashes.
+
+The supplied two-window screenshots confirm matching editor entry bodies after
+the earlier loading fix. The newest live-edit revision-reset fix passes the
+native parser regression but still needs a two-window gameplay retest; this
+release does **not** claim fully verified real-time editor synchronisation.
 
 ## What the mod is for
 
@@ -18,7 +31,7 @@ Current experimental goals include:
 - running two isolated SPORE profiles and two ModAPI instances on one PC;
 - providing diagnostic console commands such as `coopStatus`, `coopSpawn`, and `coopJoin`.
 
-## Beta 1 limitations
+## Beta 2 limitations
 
 This version has not been validated across every SPORE stage. The protocol and server are tested automatically, but the tests do not drive the SPORE game engine. Creature-stage transitions, tutorials, quests, editor transitions, and unusual save states may still cause crashes or incomplete synchronisation. Remote play over Radmin VPN/ZeroTier/Hamachi is prepared at the protocol level, but complete world transfer and reliable cross-machine testing are not finished.
 
@@ -43,6 +56,48 @@ This creates/uses the isolated second profile at `%AppData%\SporeCoop2`, install
 The host loads a saved world and uses the pause menu's co-op invitation. The guest accepts the invitation; the guest profile then attempts to load a fresh copy of the host world. `coopJoin` remains available as a diagnostic fallback. `coopSpawn` only creates a manual diagnostic clone and is not required for normal joining.
 
 ## Testing
+
+### Beta 2 — September 23 (protocol 4)
+
+This build implements native shared growth, unlock/quest notifications,
+first-part cinematic replay and guest entry into the Cell campaign editor. It
+also replaces editor models without disposing the incoming body, waits for body
+loading before saving history, and interpolates NPC movement between snapshots.
+Both DLLs and the server must be updated together using `Start-TwoSpore.ps1`.
+
+Automated checks cover protocol handling, editor revision reset on a new invitation, interpolation, shared progress,
+executable entry-point fingerprints and native movement/collision fixtures.
+Full two-window gameplay is still unverified. Retest growth, a spike pickup and
+the 1/6 quest counter, the cinematic, then editor entry/body/paint and return to
+the world. Exiting or crashing the host should show “Хост вышел” to the peer.
+
+### Earlier development notes — September 21 movement fix
+
+Cell movement now uses the game's native position and orientation setters. A
+cell's articulated physics nodes must move together with its object transform;
+otherwise the next simulation update derives the old position from those nodes.
+This applies to the remote player, the joining player's appearance proxy, join
+placement, and mirrored NPCs. Existing network bodies are corrected after native
+simulation, immediately before Cell graphics update. The local avatar keeps its
+native input and camera ownership.
+
+The engine entry points are checked against the tested executable, including ASLR
+relocations. Unsupported builds disable network cell creation. Movement logging
+now reads actual model positions after the graphics update; unavailable graphics
+are marked `gfxReady=0` instead of repeating simulation coordinates.
+
+Run the movement regression with the installed game executable:
+
+```powershell
+.\Test-Native.ps1 -GameExecutable 'C:\Games\SPORE Collection\SporebinEP1\SporeApp.exe'
+```
+
+This maps the executable without starting it and runs only verified movement
+routines against fixture data. It reproduces the transform-only failure and
+checks translation, rotation, unrelated nodes, and 1000 consecutive movements.
+It does not validate a live game session. The two-window gameplay check remains
+manual: move each player, reverse the invitation direction, grow, enter/exit the
+editor, pause/resume, and disconnect the peer.
 
 ### September 20 sync build (protocol 3)
 

@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 3;
+    constexpr int kProtocol = 4;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -40,6 +40,8 @@ namespace
     std::uint64_t gEventSequence = 0;
     std::uint64_t gSpeciesSequence = 1;
     std::uint64_t gNpcSequence = 0;
+    std::uint64_t gWorldActionSequence = 0;
+    std::vector<CoopNet::WorldAction> gWorldActions;
 
     std::string Environment(const char* name)
     {
@@ -247,6 +249,8 @@ namespace
         gSnapshot.npcSequence = 0;
         gSnapshot.npcReceivedTick = 0;
         gSnapshot.remoteNpcs.clear();
+        gSnapshot.worldActionAck = 0;
+        gWorldActions.clear();
     }
 
     bool ReadNumberArray(const std::string& json, const char* key,
@@ -273,7 +277,7 @@ namespace
             if (end == json.c_str() + position || errno == ERANGE || !std::isfinite(number))
                 return false;
             result.push_back(number);
-            if (result.size() > 48 * 14) return false;
+            if (result.size() > 4094 * 18) return false;
             position = static_cast<size_t>(end - json.c_str());
             while (position < json.size() && json[position] == ' ') ++position;
             if (position < json.size() && json[position] == ',') { ++position; continue; }
@@ -287,6 +291,17 @@ namespace
     {
         std::string type;
         if (!ReadString(json, "type", type)) return;
+
+        if (type == "sessionEnded")
+        {
+            std::string reason;
+            if (!ReadString(json, "reason", reason) || reason != "host_left") return;
+            std::lock_guard<std::mutex> lock(gMutex);
+            gSnapshot.sessionEnded = true;
+            gSnapshot.disconnectReason = reason;
+            gSnapshot.connected = false;
+            return;
+        }
 
         if (type == "welcome")
         {
@@ -308,6 +323,7 @@ namespace
             gSnapshot.editorID = 0;
             gSnapshot.editorRole.clear();
             gSnapshot.speciesSequence = 0;
+            gSnapshot.speciesAck = 0; gSnapshot.speciesConflict = false;
             gSnapshot.speciesBlob.clear();
             return;
         }
@@ -416,18 +432,18 @@ namespace
             if (!ReadString(json, "role", role) || role == gRole ||
                 !ReadNumber(json, "sequence", sequence) || sequence < 0 ||
                 sequence >= 9223372036854775808.0 || std::floor(sequence) != sequence ||
-                !ReadNumberArray(json, "npcs", values, 0) || values.size() % 14 != 0)
+                !ReadNumberArray(json, "npcs", values, 0) || values.size() % 18 != 0)
                 return;
             std::vector<CoopNet::NpcState> npcs;
-            npcs.reserve(values.size() / 14);
+            npcs.reserve(values.size() / 18);
             std::vector<std::uint32_t> ids;
-            for (size_t i = 0; i < values.size(); i += 14)
+            for (size_t i = 0; i < values.size(); i += 18)
             {
                 if (values[i] < 0 || values[i] > UINT32_MAX || std::floor(values[i]) != values[i] ||
                     values[i + 1] <= 0 || values[i + 1] > UINT32_MAX || std::floor(values[i + 1]) != values[i + 1] ||
                     std::abs(values[i + 2]) > 1000000 || std::abs(values[i + 3]) > 1000000 ||
                     std::abs(values[i + 4]) > 1000000 || values[i + 7] < 0.001 ||
-                    values[i + 7] > 100000 || values[i + 8] < 0.001 ||
+                    values[i + 7] > 100000 || values[i + 8] < 0 ||
                     values[i + 8] > 100000 || values[i + 9] < 0 || values[i + 9] > 1 ||
                     values[i + 10] < -1 || values[i + 10] > 19 ||
                     std::floor(values[i + 10]) != values[i + 10]) return;
@@ -437,7 +453,9 @@ namespace
                 for (size_t field = 11; field < 14; ++field)
                     if (values[i + field] < 0 || values[i + field] > UINT32_MAX ||
                         std::floor(values[i + field]) != values[i + field]) return;
-                if (values[i + 11] == 0) return;
+                if (values[i+14] < 0 || values[i+14] > 1000000 || std::floor(values[i+14]) != values[i+14] ||
+                    values[i+15] < 0 || values[i+15] > 125 || std::floor(values[i+15]) != values[i+15] ||
+                    (values[i+16] != 0 && values[i+16] != 1) || std::abs(values[i+17]) > 1000000) return;
                 const auto id = static_cast<std::uint32_t>(values[i]);
                 if (std::find(ids.begin(), ids.end(), id) != ids.end()) return;
                 ids.push_back(id);
@@ -456,6 +474,8 @@ namespace
                 npc.modelInstance = static_cast<std::uint32_t>(values[i + 11]);
                 npc.modelType = static_cast<std::uint32_t>(values[i + 12]);
                 npc.modelGroup = static_cast<std::uint32_t>(values[i + 13]);
+                npc.health=int(values[i+14]); npc.animation=std::uint32_t(values[i+15]);
+                npc.dead=values[i+16]!=0; npc.elevation=float(values[i+17]);
                 npcs.push_back(npc);
             }
             std::lock_guard<std::mutex> lock(gMutex);
@@ -464,6 +484,24 @@ namespace
             gSnapshot.npcSequence = static_cast<std::uint64_t>(sequence);
             gSnapshot.npcReceivedTick = GetTickCount64();
             gSnapshot.remoteNpcs = std::move(npcs);
+            double ack=0; if (ReadNumber(json,"actionAck",ack)) gSnapshot.worldActionAck=std::uint64_t(ack);
+            return;
+        }
+
+        if (type == "worldAction")
+        {
+            std::string role; double seq=0,id=0,resource=0,damage=0;
+            CoopNet::WorldAction action;
+            if (!ReadString(json,"role",role) || role==gRole ||
+                !ReadNumber(json,"sequence",seq) || seq < 1 ||
+                !ReadNumber(json,"id",id) || id < 0 || id > UINT32_MAX ||
+                !ReadNumber(json,"resource",resource) || resource < 1 || resource > UINT32_MAX ||
+                !ReadNumber(json,"damage",damage) || damage < 0 || damage > 1000000 ||
+                !ReadBool(json,"removed",action.removed) || !ReadBool(json,"effects",action.effects)) return;
+            action.sequence=std::uint64_t(seq); action.id=std::uint32_t(id);
+            action.resource=std::uint32_t(resource); action.damage=int(damage);
+            std::lock_guard<std::mutex> lock(gMutex);
+            if (gWorldActions.size()<4096) gWorldActions.push_back(action);
             return;
         }
 
@@ -523,6 +561,18 @@ namespace
                 remotePeerPresent);
 
             std::lock_guard<std::mutex> lock(gMutex);
+            if (worldGeneration != gSnapshot.worldGeneration)
+            {
+                gSnapshot.remoteNpcs.clear(); gSnapshot.npcReceivedTick=0;
+                gSnapshot.npcSequence=0; gSnapshot.worldActionAck=0; gWorldActions.clear();
+                // The server resets species revisions on every accepted new
+                // invitation. A previous campaign's larger revision must not
+                // reject the new entry body or cause endless base conflicts.
+                gSnapshot.speciesSequence = 0;
+                gSnapshot.speciesBlob.clear();
+                gSnapshot.speciesAck = 0;
+                gSnapshot.speciesConflict = false;
+            }
             if (hasPlayers && !remotePeerPresent) ClearRemotePeerStateLocked();
             else if (hasPlayers)
             {
@@ -543,7 +593,7 @@ namespace
             gSnapshot.hostPaused = hostPaused;
             gSnapshot.editorRole = editorRole;
             gSnapshot.editorID = editorID;
-            if (!species.empty() && speciesSequence >= gSnapshot.speciesSequence)
+            if (speciesSequence >= gSnapshot.speciesSequence)
             {
                 gSnapshot.speciesSequence = speciesSequence;
                 gSnapshot.speciesBlob = std::move(species);
@@ -563,12 +613,12 @@ namespace
             return;
         }
 
-        if (type == "speciesLive" || type == "editorClosed")
+        if (type == "speciesLive" || type == "speciesConflict" || type == "editorClosed")
         {
             std::string role;
             std::string species;
             double sequence = 0;
-            if (!ReadString(json, "role", role) || role == gRole ||
+            if (!ReadString(json, "role", role) ||
                 !ReadString(json, "species", species) ||
                 !ReadNumber(json, "sequence", sequence)) return;
             std::lock_guard<std::mutex> lock(gMutex);
@@ -576,6 +626,11 @@ namespace
             {
                 gSnapshot.speciesSequence = static_cast<std::uint64_t>(sequence);
                 gSnapshot.speciesBlob = std::move(species);
+            }
+            if (role == gRole && type != "editorClosed")
+            {
+                double ack=0; if(ReadNumber(json,"clientSequence",ack)) gSnapshot.speciesAck=std::uint64_t(ack);
+                gSnapshot.speciesConflict=type=="speciesConflict";
             }
             if (type == "editorClosed") gSnapshot.editorOpen = false;
         }
@@ -597,6 +652,11 @@ namespace
     void MarkDisconnected()
     {
         std::lock_guard<std::mutex> lock(gMutex);
+        if (gSnapshot.inviteAccepted && !gSnapshot.sessionEnded)
+        {
+            gSnapshot.sessionEnded = true;
+            gSnapshot.disconnectReason = "connection_lost";
+        }
         gSnapshot.connected = false;
         ClearRemotePeerStateLocked();
         gOutgoing.clear();
@@ -624,12 +684,15 @@ namespace
         std::vector<unsigned char> input;
         input.reserve(65536);
         ULONG64 lastHeartbeat = GetTickCount64();
+        ULONG64 lastReceived = lastHeartbeat;
         while (!gStop.load())
         {
+            { std::lock_guard<std::mutex> lock(gMutex); if (gSnapshot.sessionEnded) return false; }
             if (!DrainMessages(socket)) return false;
             // Menus, pauses and loading screens do not submit movement. Keep
             // the session alive independently of the game's update callback.
             const ULONG64 now = GetTickCount64();
+            if (now - lastReceived > 15000) return false;
             if (now - lastHeartbeat >= 4000)
             {
                 if (!SendFrame(socket, "{\"type\":\"ping\"}")) return false;
@@ -648,6 +711,7 @@ namespace
             const int received = recv(socket, reinterpret_cast<char*>(chunk),
                 static_cast<int>(sizeof(chunk)), 0);
             if (received <= 0) return false;
+            lastReceived = GetTickCount64();
             input.insert(input.end(), chunk, chunk + received);
 
             while (input.size() >= 4)
@@ -660,6 +724,7 @@ namespace
                 if (input.size() < static_cast<size_t>(length) + 4) break;
                 HandleMessage(std::string(input.begin() + 4, input.begin() + 4 + length));
                 input.erase(input.begin(), input.begin() + 4 + length);
+                { std::lock_guard<std::mutex> lock(gMutex); if (gSnapshot.sessionEnded) return false; }
             }
         }
         return true;
@@ -672,6 +737,9 @@ namespace
 
         while (!gStop.load())
         {
+            bool ended;
+            { std::lock_guard<std::mutex> lock(gMutex); ended = gSnapshot.sessionEnded; }
+            if (ended) { Sleep(100); continue; }
             SOCKET socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (socket == INVALID_SOCKET) break;
 
@@ -750,6 +818,15 @@ namespace
 
 namespace CoopNet
 {
+    void AcknowledgeSessionEnd()
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        // Cleanup must complete before allowing another handshake.
+        if (gSocket.load() != INVALID_SOCKET) return;
+        gSnapshot.sessionEnded = false;
+        gSnapshot.disconnectReason.clear();
+    }
+
     bool StartFromEnvironment()
     {
         if (gStarted.exchange(true)) return gSnapshot.enabled;
@@ -861,24 +938,41 @@ namespace CoopNet
             (paused ? "true}" : "false}"));
     }
 
-    void SubmitNpcSnapshot(const std::vector<NpcState>& npcs)
+    void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck)
     {
         std::string packet = "{\"type\":\"npcSnapshot\",\"sequence\":" +
-            std::to_string(gNpcSequence++) + ",\"npcs\":[";
+            std::to_string(gNpcSequence++) + ",\"actionAck\":" + std::to_string(actionAck) + ",\"npcs\":[";
         bool first = true;
         for (const auto& npc : npcs)
         {
             char item[384]{};
-            sprintf_s(item, "%s%u,%u,%.6f,%.6f,%.6f,%.7f,%.7f,%.6f,%.6f,%.6f,%d,%u,%u,%u",
+            sprintf_s(item, "%s%u,%u,%.6f,%.6f,%.6f,%.7f,%.7f,%.6f,%.6f,%.6f,%d,%u,%u,%u,%d,%u,%d,%.6f",
                 first ? "" : ",", npc.id, npc.cellResource,
                 npc.x, npc.y, npc.z, npc.qz, npc.qw, npc.scale,
                 npc.targetSize, npc.opacity, npc.stageScale,
-                npc.modelInstance, npc.modelType, npc.modelGroup);
+                npc.modelInstance, npc.modelType, npc.modelGroup, npc.health, npc.animation, npc.dead ? 1 : 0, npc.elevation);
             packet += item;
             first = false;
         }
         packet += "]}";
         Queue(std::move(packet));
+    }
+
+    std::uint64_t SubmitWorldAction(WorldAction action)
+    {
+        action.sequence=++gWorldActionSequence;
+        const auto snapshot=GetSnapshot();
+        Queue("{\"type\":\"worldAction\",\"worldGeneration\":" + std::to_string(snapshot.worldGeneration) +
+            ",\"sequence\":" + std::to_string(action.sequence) + ",\"id\":" + std::to_string(action.id) +
+            ",\"resource\":" + std::to_string(action.resource) + ",\"damage\":" + std::to_string(action.damage) +
+            ",\"removed\":" + (action.removed ? "true" : "false") + ",\"effects\":" + (action.effects ? "true}" : "false}"));
+        return action.sequence;
+    }
+
+    std::vector<WorldAction> TakeWorldActions()
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        std::vector<WorldAction> result; result.swap(gWorldActions); return result;
     }
 
     void SeedProgress(const CellProgress& progress)
@@ -893,10 +987,10 @@ namespace CoopNet
             NextEventID("progress") + "\"," + ProgressFields(delta, absoluteUnlocks, true) + "}");
     }
 
-    void SubmitEditorOpen(std::uint32_t editorID)
+    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies)
     {
         Queue("{\"type\":\"editorOpen\",\"editorId\":" +
-            std::to_string(static_cast<unsigned long long>(editorID)) + "}");
+            std::to_string(static_cast<unsigned long long>(editorID)) + ",\"species\":\"" + JsonEscape(initialSpecies) + "\"}");
     }
 
     void SubmitEditorClose(const std::string& speciesBlob)
@@ -905,10 +999,12 @@ namespace CoopNet
             JsonEscape(speciesBlob) + "\"}");
     }
 
-    void SubmitSpecies(const std::string& speciesBlob)
+    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence)
     {
+        const auto sequence=gSpeciesSequence++;
         Queue("{\"type\":\"speciesLive\",\"sequence\":" +
-            std::to_string(gSpeciesSequence++) + ",\"species\":\"" +
+            std::to_string(sequence) + ",\"baseSequence\":" + std::to_string(baseSequence) + ",\"species\":\"" +
             JsonEscape(speciesBlob) + "\"}");
+        return sequence;
     }
 }

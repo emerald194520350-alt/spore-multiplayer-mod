@@ -22,6 +22,13 @@
 #include "SessionRules.h"
 #include "ProgressSync.h"
 #include "CellEngineAbi.h"
+#include "CellMotionAbi.h"
+#include "CellReplicaAbi.h"
+#include "CellGrowthAbi.h"
+#include "CellProgressAbi.h"
+#include "WorldCoordinates.h"
+#include "NpcMotion.h"
+#include "EditorSync.h"
 #include "SaveCompatibility.h"
 #include "CoopUi.h"
 #include <Spore/Simulator/Cell/cCellGFX.h>
@@ -31,6 +38,73 @@
 namespace
 {
     void WriteProbeLog(const char* message);
+    using CellGraphicsUpdateFunction = void(__cdecl*)();
+    CellGraphicsUpdateFunction gCellGraphicsUpdateOriginal = nullptr;
+    bool gCellGraphicsHookAttached = false;
+    void* gCellGrowthOriginal = nullptr;
+    bool gCellGrowthHookAttached = false;
+    CoopWorld::Coordinates gWorldCoordinates;
+    CoopWorld::Point gGrowthBefore;
+    float gGrowthScaleBefore = 0;
+    Simulator::cObjectPoolIndex gGrowthAvatar = -1;
+
+    void __cdecl BeforeWorldGrowth()
+    {
+        auto game = Simulator::Cell::cCellGame::Get();
+        auto player = game ? game->mCells.GetIfNotDeleted(game->mAvatarCellIndex) : nullptr;
+        gGrowthAvatar = player ? player->Index() : -1;
+        gGrowthScaleBefore = player ? player->mTransform.GetScale() : 0;
+        if (player) { const auto& p = player->GetPosition(); gGrowthBefore = {p.x,p.y,p.z}; }
+    }
+
+    void __cdecl AfterWorldGrowth()
+    {
+        auto game = Simulator::Cell::cCellGame::Get();
+        auto player = game && game->mAvatarCellIndex == gGrowthAvatar
+            ? game->mCells.GetIfNotDeleted(gGrowthAvatar) : nullptr;
+        if (!player || gGrowthScaleBefore <= 0 || player->mTransform.GetScale() <= 0) return;
+        const auto& p = player->GetPosition();
+        gWorldCoordinates.Rebase(gGrowthBefore, {p.x,p.y,p.z},
+            double(gGrowthScaleBefore)/player->mTransform.GetScale());
+    }
+
+    // The engine uses EAX for the pivot and one caller-cleaned stack argument.
+    // Preserve that ABI on both sides of the trampoline.
+    __declspec(naked) void CellGrowthHook()
+    {
+        __asm {
+            pushfd
+            pushad
+            call BeforeWorldGrowth
+            popad
+            popfd
+            push dword ptr [esp+4]
+            call dword ptr [gCellGrowthOriginal]
+            add esp,4
+            pushfd
+            pushad
+            call AfterWorldGrowth
+            popad
+            popfd
+            ret
+        }
+    }
+
+    CoopNet::Snapshot LocalWorldSnapshot(CoopNet::Snapshot snapshot)
+    {
+        const auto p = gWorldCoordinates.Decode({snapshot.remoteX,snapshot.remoteY,snapshot.remoteZ});
+        snapshot.remoteX = float(p.x); snapshot.remoteY = float(p.y); snapshot.remoteZ = float(p.z);
+        snapshot.remoteScale /= float(gWorldCoordinates.unit);
+        snapshot.remoteTargetSize /= float(gWorldCoordinates.unit);
+        snapshot.remotePose.scale /= float(gWorldCoordinates.unit);
+        for (auto& npc : snapshot.remoteNpcs)
+        {
+            const auto n = gWorldCoordinates.Decode({npc.x,npc.y,npc.z});
+            npc.x=float(n.x); npc.y=float(n.y); npc.z=float(n.z);
+            npc.scale/=float(gWorldCoordinates.unit); npc.targetSize/=float(gWorldCoordinates.unit);
+        }
+        return snapshot;
+    }
 
     UpdateMessageListenerPtr gUpdateListener;
     IMessageListenerPtr gEditorListener;
@@ -86,6 +160,9 @@ namespace
     IWindowPtr gInvitePromptTitle;
     IWindowPtr gInvitePromptDetail;
     IWindowPtr gSessionStatus;
+    IWindowPtr gSessionEndedPanel;
+    IWindowPtr gSessionEndedTitle;
+    IWindowPtr gSessionEndedOk;
     bool gReturnAfterInvite = false;
     bool gObservedInviteAccepted = false;
     IWinProcPtr gInviteWinProc;
@@ -96,8 +173,16 @@ namespace
     int gLastHostPauseSent = -1;
     CoopSession::PauseLease gCoopPause;
     ULONG64 gLastSpeciesTick = 0;
+    Editors::EditorModel* gObservedEditorModel = nullptr;
+    ULONG64 gEditorModelReadySince = 0;
+    bool gEditorHistoryPending = false;
+    cEditorResourcePtr gEditorEntryResource;
+    std::uint64_t gEditorEntrySpeciesSequence = 0;
+    bool gEditorInitialModelPending = false;
     std::string gLastLocalSpecies;
     uint64_t gAppliedSpeciesSequence = 0;
+    uint64_t gPendingSpeciesSequence = 0;
+    std::string gPendingSpecies;
     ULONG64 gLastNpcSnapshotTick = 0;
 
     struct MirroredNpc
@@ -107,8 +192,15 @@ namespace
         std::uint64_t seenSequence = 0;
         ResourceKey modelKey{};
         ULONG64 createdAt = 0;
+        int appliedHealth = 6;
+        std::vector<std::pair<std::uint64_t,int>> pendingDamage;
+        std::uint64_t pendingRemoval = 0;
+        std::uint64_t appliedAnimationSequence = 0;
+        CoopWorld::NpcMotion motion;
     };
     std::map<std::uint32_t, MirroredNpc> gMirroredNpcs;
+    std::uint64_t gWorldActionApplied = 0;
+    bool gWorldRemovalHookAttached = false;
 
     bool JoinSavedWorld();
     bool ValidateIncomingSavedWorld(const char* inviterRole);
@@ -273,23 +365,220 @@ namespace
         return function;
     }
 
+    template<std::size_t N>
+    void* VerifiedMotionCode(std::uintptr_t rva, std::size_t size, std::uint32_t hash,
+        const std::size_t (&relocations)[N])
+    {
+        const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const auto address = base + rva;
+        MEMORY_BASIC_INFORMATION memory{};
+        if (!VirtualQuery(reinterpret_cast<void*>(address), &memory, sizeof(memory)) ||
+            memory.State != MEM_COMMIT || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+            reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize < address + size)
+            return nullptr;
+        return CoopEngine::MatchesMotionCode(reinterpret_cast<const unsigned char*>(address),
+            size, base, size, hash, relocations) ? reinterpret_cast<void*>(address) : nullptr;
+    }
+
+    struct CellMotionFunctions
+    {
+        using Position = void(__cdecl*)(Simulator::Cell::cCellObjectData*, const Math::Vector3*);
+        using Orientation = void(__cdecl*)(Simulator::Cell::cCellObjectData*, const Math::Quaternion*);
+        Position position;
+        Orientation orientation;
+        bool Ready() const { return position && orientation; }
+    };
+
+    const CellMotionFunctions& GetCellMotionFunctions()
+    {
+        static const CellMotionFunctions functions{
+            reinterpret_cast<CellMotionFunctions::Position>(VerifiedMotionCode(CoopEngine::kPositionRva,
+                CoopEngine::kPositionSize, CoopEngine::kPositionHash, CoopEngine::kPositionRelocations)),
+            reinterpret_cast<CellMotionFunctions::Orientation>(VerifiedMotionCode(CoopEngine::kOrientationRva,
+                CoopEngine::kOrientationSize, CoopEngine::kOrientationHash, CoopEngine::kOrientationRelocations))
+        };
+        return functions;
+    }
+
+    struct CellProgressFunctions
+    {
+        void(__cdecl* addFood)(int, bool);
+        void(__cdecl* unlockPart)(int);
+        void(__cdecl* enterEditor)(bool);
+        void(__cdecl* partCinematic)();
+        bool Ready() const { return addFood && unlockPart && enterEditor && partCinematic; }
+    };
+
+    const CellProgressFunctions& GetCellProgressFunctions()
+    {
+        static const CellProgressFunctions functions{
+            reinterpret_cast<void(__cdecl*)(int,bool)>(VerifiedMotionCode(CoopEngine::kAddFoodRva,
+                CoopEngine::kAddFoodSize,CoopEngine::kAddFoodHash,CoopEngine::kAddFoodRelocations)),
+            reinterpret_cast<void(__cdecl*)(int)>(VerifiedMotionCode(CoopEngine::kUnlockPartRva,
+                CoopEngine::kUnlockPartSize,CoopEngine::kUnlockPartHash,CoopEngine::kUnlockPartRelocations)),
+            reinterpret_cast<void(__cdecl*)(bool)>(VerifiedMotionCode(CoopEngine::kEnterCellEditorRva,
+                CoopEngine::kEnterCellEditorSize,CoopEngine::kEnterCellEditorHash,CoopEngine::kEnterCellEditorRelocations)),
+            reinterpret_cast<void(__cdecl*)()>(VerifiedMotionCode(CoopEngine::kPartCinematicRva,
+                CoopEngine::kPartCinematicSize,CoopEngine::kPartCinematicHash,CoopEngine::kPartCinematicRelocations))
+        };
+        return functions;
+    }
+
+    bool MoveCellBody(Simulator::Cell::cCellObjectData* cell, const Math::Vector3& position,
+        const Math::Quaternion& orientation)
+    {
+        const auto& functions = GetCellMotionFunctions();
+        if (!cell || !functions.Ready()) return false;
+        // Direct SetOffset moves only the object, not its articulated physics
+        // nodes. E7C080 recomputes its position from those nodes next frame.
+        // The native setters move/rotate the whole body and bump the transform
+        // revision; field_C0 is a separate local model transform, not a pose.
+        functions.position(cell, &position);
+        functions.orientation(cell, &orientation);
+        cell->mTargetPosition = position;
+        cell->mTargetOrientation = orientation;
+        cell->field_84 = position;
+        cell->field_90 = Math::Vector3(0, 0, 0);
+        return true;
+    }
+
+    extern RemoveCellFunction gWorldRemoveOriginal;
+
     void DestroyCell(Simulator::cObjectPoolIndex index)
     {
         auto game = Simulator::IsCellGame() ? Simulator::Cell::cCellGame::Get() : nullptr;
-        auto remove = GetRemoveCellFunction();
+        auto remove = gWorldRemoveOriginal ? gWorldRemoveOriginal : GetRemoveCellFunction();
         if (game && remove && CoopVisual::HasCellIndex(index) &&
             index != game->mAvatarCellIndex && game->mCells.GetIfNotDeleted(index))
             remove(index, false, 0.0f, false);
+    }
+
+    RemoveCellFunction gWorldRemoveOriginal = nullptr;
+
+    bool IsPartCinematic(Simulator::Cell::cCellGame* game)
+    {
+        // E79720 sets the byte at +518C; E7970D clears it on completion.
+        return game && (game->field_518C & 0xff) != 0;
+    }
+
+    void __cdecl WorldRemoveHook(Simulator::cObjectPoolIndex index, bool effects, float size, bool immediate)
+    {
+        auto snapshot=CoopNet::GetSnapshot();
+        if (snapshot.connected && snapshot.inviteAccepted && !snapshot.editorOpen &&
+            !CoopSession::IsWorldOwner(snapshot,CoopNet::GetRole()) &&
+            !IsPartCinematic(Simulator::Cell::cCellGame::Get()))
+        {
+            auto game=Simulator::Cell::cCellGame::Get();
+            auto player=GetLocalPlayerCell();
+            auto cell=game ? game->mCells.GetIfNotDeleted(index) : nullptr;
+            for (auto& entry:gMirroredNpcs)
+            {
+                auto& mirror=entry.second;
+                if (mirror.cellIndex!=index || !cell || !player || mirror.pendingRemoval) continue;
+                cCellCellResourcePtr resource;
+                auto data=Simulator::Cell::GetData(cell->mCellResource,resource);
+                const auto& p=cell->GetPosition(); const auto& a=player->GetPosition();
+                const float radius=std::max(2.0f,(cell->mTransform.GetScale()+player->mTransform.GetScale())*4);
+                const bool pickup=data && (data->eat.foodValue>0 || static_cast<int>(data->unlockType)!=0) &&
+                    (p.x-a.x)*(p.x-a.x)+(p.y-a.y)*(p.y-a.y)<=radius*radius;
+                if (effects || cell->mHealthPoints<=0 || pickup)
+                {
+                    CoopNet::WorldAction action; action.id=entry.first;
+                    action.resource=cell->mCellResource->mInstanceID;
+                    action.removed=true; action.effects=effects;
+                    mirror.pendingRemoval=CoopNet::SubmitWorldAction(action);
+                    // Loot is generated once by the world owner. The guest's
+                    // native pickup already contributes its progress delta.
+                    effects=false;
+                }
+                break;
+            }
+        }
+        gWorldRemoveOriginal(index,effects,size,immediate);
+    }
+
+    void ApplyWorldActions()
+    {
+        auto game=Simulator::Cell::cCellGame::Get();
+        if (!game || !gWorldRemoveOriginal) return;
+        for (const auto& action:CoopNet::TakeWorldActions())
+        {
+            if (action.sequence<=gWorldActionApplied) continue;
+            auto cell=game->mCells.GetIfNotDeleted(static_cast<int>(action.id));
+            if (cell && cell->Index()!=game->mAvatarCellIndex && cell->Index()!=gRemoteCellIndex &&
+                cell->mCellResource && cell->mCellResource->mInstanceID==action.resource)
+            {
+                if (action.removed) gWorldRemoveOriginal(cell->Index(),action.effects,cell->mTransform.GetScale(),false);
+                else if (action.damage) cell->mHealthPoints=std::max(0,cell->mHealthPoints-action.damage);
+            }
+            gWorldActionApplied=action.sequence;
+        }
+    }
+
+    using UnregisterCollisionFunction = void(__cdecl*)(void*, int);
+
+    UnregisterCollisionFunction GetUnregisterCollisionFunction()
+    {
+        static const auto function = []() -> UnregisterCollisionFunction {
+            const auto address = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr)) +
+                CoopEngine::kUnregisterCollisionRva;
+            MEMORY_BASIC_INFORMATION memory{};
+            if (!VirtualQuery(reinterpret_cast<void*>(address), &memory, sizeof(memory)) ||
+                memory.State != MEM_COMMIT || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+                reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize <
+                    address + CoopEngine::kUnregisterCollisionSize) return nullptr;
+            return CoopEngine::MatchesStaticCode(reinterpret_cast<const unsigned char*>(address),
+                CoopEngine::kUnregisterCollisionSize, CoopEngine::kUnregisterCollisionSize,
+                CoopEngine::kUnregisterCollisionHash)
+                ? reinterpret_cast<UnregisterCollisionFunction>(address) : nullptr;
+        }();
+        return function;
+    }
+
+    bool InitializeReplica(Simulator::Cell::cCellObjectData* cell, bool interactive = false)
+    {
+        auto game = Simulator::Cell::cCellGame::Get();
+        auto unregister = GetUnregisterCollisionFunction();
+        if (!cell || !game || cell->Index() == game->mAvatarCellIndex || !unregister) return false;
+        void* broadphase = nullptr;
+        static_assert(offsetof(Simulator::Cell::cCellGame, padding_4104) == 0x4104,
+            "Cell collision broadphase ABI");
+        std::memcpy(&broadphase, game->padding_4104, sizeof(broadphase));
+        if (!broadphase) return false;
+        const int collisionHandle = cell->field_364;
+        if (!interactive && collisionHandle != -1)
+        {
+            // Unlink through the same engine routine used by DestroyCell.
+            // Merely writing -1 leaks a live collider. The native update and
+            // destructor both skip an already unregistered handle.
+            unregister(broadphase, collisionHandle);
+            cell->field_364 = -1;
+        }
+        cell->mIsIdle = true;
+        cell->mIsInvulnerable = !interactive;
+        // field_112 is a death flag, NOT a collision/friendly flag:
+        // E7A1F6 requests DeathNpc and E660E0 starts cell_death_continuous.
+        // Initialize only the new replica; never rewrite the live avatar.
+        cell->field_112 = false;
+        char line[320]{};
+        sprintf_s(line, "ReplicaInit: cell=%d collider=%d->%d dead=%d anim=%d state118=%d health=%d avatar=%d",
+            cell->Index(), collisionHandle, cell->field_364, cell->field_112,
+            static_cast<int>(cell->mCurrentAnimation), cell->field_118,
+            cell->mHealthPoints, game->mAvatarCellIndex);
+        WriteProbeLog(line);
+        return true;
     }
 
     Simulator::cObjectPoolIndex CreateCellFromResource(
         Simulator::Cell::cCellDataReference<Simulator::Cell::cCellCellResource>* reference,
         Simulator::Cell::CellStageScale stageScale,
         const Math::Vector3& position,
-        const ResourceKey* modelOverride = nullptr)
+        const ResourceKey* modelOverride = nullptr, bool interactive = false)
     {
         auto game = Simulator::Cell::cCellGame::Get();
-        if (!game || !game->mpCellQuery || !reference || !GetRemoveCellFunction()) return -1;
+        if (!game || !game->mpCellQuery || !reference || !GetRemoveCellFunction() ||
+            !GetCellMotionFunctions().Ready() || !gCellGraphicsHookAttached || !gCellGrowthHookAttached || !gWorldRemovalHookAttached ||
+            !GetUnregisterCollisionFunction()) return -1;
 
         cCellCellResourcePtr cellReference;
         auto cellData = Simulator::Cell::GetData(reference, cellReference);
@@ -322,13 +611,13 @@ namespace
                 break;
             }
         }
-        if (!modelAttachment)
+        if (!modelAttachment && modelOverride && modelOverride->instanceID)
         {
             WriteProbeLog("coop clone aborted: no creature attachment was found.");
             return -1;
         }
 
-        const auto originalAttachmentType = modelAttachment->type;
+        const auto originalAttachmentType = modelAttachment ? modelAttachment->type : AttachmentType::Creature;
         auto serializable = game->mpSerializableData.get();
         ResourceKey originalPlayerKey{};
         if (modelOverride && serializable)
@@ -336,14 +625,20 @@ namespace
             originalPlayerKey = serializable->mPlayerCreatureKey;
             serializable->mPlayerCreatureKey = *modelOverride;
         }
-        modelAttachment->type = AttachmentType::PlayerCreature;
+        if (modelAttachment) modelAttachment->type = AttachmentType::PlayerCreature;
         const auto avatarBefore = game->mAvatarCellIndex;
         const auto index = Simulator::Cell::CreateCellObject(game->mpCellQuery,
             position, 0.0f, reference, stageScale, 1.0f, 1.0f);
         game->mAvatarCellIndex = avatarBefore;
-        modelAttachment->type = originalAttachmentType;
+        if (modelAttachment) modelAttachment->type = originalAttachmentType;
         if (modelOverride && serializable)
             serializable->mPlayerCreatureKey = originalPlayerKey;
+        auto cell = CoopVisual::HasCellIndex(index) ? game->mCells.GetIfNotDeleted(index) : nullptr;
+        if (!InitializeReplica(cell, interactive))
+        {
+            DestroyCell(index);
+            return -1;
+        }
         return index;
     }
 
@@ -421,7 +716,9 @@ namespace
             result.missions[i * 4] = std::clamp(data->missions[i].state, 0, 100000000);
             result.missions[i * 4 + 1] = std::clamp(data->missions[i].progress, 0, 100000000);
             result.missions[i * 4 + 2] = std::clamp(data->missions[i].plantProgress, 0, 100000000);
-            result.missions[i * 4 + 3] = std::clamp(data->missions[i].field_C, 0, 100000000);
+            // +0C is a local floating-point presentation timer, not an integer
+            // mission counter. Sending its bit pattern kept restarting popups.
+            result.missions[i * 4 + 3] = 0;
         }
         result.killCount = std::max(0, data->mKillCount);
         result.playerHasMoved = data->playerHasMoved;
@@ -437,6 +734,30 @@ namespace
         auto game = Simulator::Cell::cCellGame::Get();
         auto data = game ? game->mpSerializableData.get() : nullptr;
         if (!data) return;
+        const auto& native = GetCellProgressFunctions();
+        if (!native.Ready()) return;
+        const int oldFood = data->mFoodProgression;
+        const int gainedFood = std::max(0, std::min(1000, value.food) - oldFood);
+        if (gainedFood)
+        {
+            // This updates articulated body size, global scale and camera in
+            // exactly the same path as a local pickup. A save-field assignment
+            // alone leaves the guest avatar at its previous physical size.
+            native.addFood(gainedFood, false);
+            char line[160]{};
+            sprintf_s(line,"Shared native growth: food=%d->%d scale=%.4f",oldFood,data->mFoodProgression,game->field_514C);
+            WriteProbeLog(line);
+        }
+        if (value.partCinematicPlayed && !data->mPartCinematicPlayed)
+            native.partCinematic();
+        for (size_t i = 0; i < value.unlocks.size(); ++i)
+            if (value.unlocks[i] > 0 && data->mUnlockedParts[i] == 0)
+            {
+                native.unlockPart(static_cast<int>(i));
+                char line[100]{};
+                sprintf_s(line,"Shared native part unlock: part=%u",static_cast<unsigned>(i));
+                WriteProbeLog(line);
+            }
         data->mFoodProgression = value.food;
         data->mPlantFoodProgression = value.plantFood;
         data->mOverPlantFoodProgression = value.overPlantFood;
@@ -449,19 +770,20 @@ namespace
             data->missions[i].state = value.missions[i * 4];
             data->missions[i].progress = value.missions[i * 4 + 1];
             data->missions[i].plantProgress = value.missions[i * 4 + 2];
-            data->missions[i].field_C = value.missions[i * 4 + 3];
         }
         data->mKillCount = value.killCount;
         data->playerHasMoved = value.playerHasMoved;
         data->playerHasEaten = value.playerHasEaten;
-        data->mPartCinematicPlayed = value.partCinematicPlayed;
+        // The native cinematic marks its own completion. Do not suppress it
+        // merely because the other window has already played it.
         data->mShowMateButton = value.showMateButton;
         data->mFirstEditorEntry = value.firstEditorEntry;
     }
 
     void UpdateSharedCellProgress(const CoopNet::Snapshot& snapshot)
     {
-        if (!Simulator::IsCellGame() || !GetLocalPlayerCell()) return;
+        if (!Simulator::IsCellGame() || Simulator::IsEditorMode() || snapshot.editorOpen ||
+            !GetLocalPlayerCell()) return;
         auto game = Simulator::Cell::cCellGame::Get();
         auto data = game ? game->mpSerializableData.get() : nullptr;
         if (!data) return;
@@ -480,12 +802,14 @@ namespace
         {
             gProgressSync.Initialize(snapshot.progress);
             ApplyCellProgress(snapshot.progress);
+            gProgressSync.ObserveApplied(ReadCellProgress());
             return;
         }
         CoopProgress::Event event;
-        if (gProgressSync.Capture(current, event))
+        if (gProgressSync.Capture(current, event, CoopSession::IsWorldOwner(snapshot,CoopNet::GetRole())))
             CoopNet::SubmitProgressDelta(event.sequence, event.delta, current.unlocks);
         ApplyCellProgress(gProgressSync.Reconcile(snapshot.progress, snapshot.progressAckSequence));
+        gProgressSync.ObserveApplied(ReadCellProgress());
     }
     bool UpdateLocalCellStability(Simulator::Cell::cCellObjectData* player,
         const ResourceKey& speciesKey, ULONG64 now)
@@ -583,11 +907,8 @@ namespace
         }
         const bool owner = CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole());
         const auto sharedSize = CoopVisual::SharedSize(owner, player->mTransform.GetScale(), player->mTargetSize, snapshot);
-        if (!owner)
-        {
-            player->mTargetSize = sharedSize.target;
-            player->mTransform.SetScale(sharedSize.scale);
-        }
+        // The avatar grows through native food progression. Writing only its
+        // transform scale corrupts the relation to its collision/body nodes.
         ApplyRemoteAppearance(snapshot);
         auto serializable = game->mpSerializableData.get();
         const ResourceKey localSpecies = serializable
@@ -632,21 +953,16 @@ namespace
             gRemoteCellResource = snapshot.remoteCellResource;
             gRemoteRenderDelayed = false;
             char line[256]{};
-            sprintf_s(line, "Full peer cell created: index=%d model=%08X.",
-                gRemoteCellIndex, visualKey.instanceID);
+            sprintf_s(line, "Full peer cell created: index=%d model=%08X eggState=%d animation=%d hatchTime=%.3f.",
+                gRemoteCellIndex, visualKey.instanceID, remote->field_118,
+                static_cast<int>(remote->mCurrentAnimation), remote->mSpawnTime);
             WriteProbeLog(line);
         }
         remote->mIsIdle = true;
         remote->mIsInvulnerable = true;
-        remote->field_112 = true;
-        remote->mTargetPosition = renderedPosition;
-        remote->mTargetOrientation = Math::Quaternion(pose.qx, pose.qy, pose.qz, pose.qw);
-        remote->mTransform.SetOffset(renderedPosition);
-        remote->mTransform.SetRotation(Math::Quaternion(pose.qx, pose.qy, pose.qz, pose.qw));
-        remote->field_84 = renderedPosition;
-        remote->field_90 = Math::Vector3(0, 0, 0);
-        remote->mTransform.SetScale(sharedSize.scale);
-        remote->mTargetSize = sharedSize.target;
+        MoveCellBody(remote, renderedPosition, Math::Quaternion(pose.qx, pose.qy, pose.qz, pose.qw));
+        remote->mTransform.SetScale(snapshot.remoteScale);
+        remote->mTargetSize = snapshot.remoteTargetSize;
         remote->mOpacity = pose.visible ? 1.0f : 0.0f;
         remote->mTargetOpacity = remote->mOpacity;
     }
@@ -671,81 +987,6 @@ namespace
         if (CoopVisual::HasCellIndex(removed) && reason) WriteProbeLog(reason);
     }
 
-    void UpdateHostAppearanceProxy(const CoopNet::Snapshot& snapshot,
-        Simulator::Cell::cCellObjectData* player)
-    {
-        if (CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) ||
-            !snapshot.inviteAccepted || !snapshot.hasRemotePosition ||
-            GetTickCount64() - snapshot.remotePositionReceivedTick > 2000 ||
-            !player || !gRemoteCreationKey.instanceID)
-        {
-            if (CoopVisual::HasCellIndex(gHostAppearanceProxyIndex))
-                RemoveHostAppearanceProxy("Host appearance proxy removed.");
-            return;
-        }
-        auto game = Simulator::Cell::cCellGame::Get();
-        if (!game) return;
-        // Identical launch-prepared creations need no hidden avatar or proxy.
-        // Keep the native body responsible for both input and rendering.
-        auto data = game->mpSerializableData.get();
-        if (data && SameResourceKey(data->mPlayerCreatureKey, gRemoteCreationKey))
-        {
-            RemoveHostAppearanceProxy("Local species already matches the world owner.");
-            return;
-        }
-        auto proxy = CoopVisual::HasCellIndex(gHostAppearanceProxyIndex)
-            ? game->mCells.GetIfNotDeleted(gHostAppearanceProxyIndex) : nullptr;
-        if (proxy && gHostAppearanceProxyModel != gRemoteCreationKey.instanceID)
-        {
-            RemoveHostAppearanceProxy("Host appearance changed; rebuilding local proxy.");
-            proxy = nullptr;
-        }
-        if (!proxy)
-        {
-            gHostAppearanceProxyIndex = CreatePlayerCellClone(player,
-                player->GetPosition(), true, &gRemoteCreationKey);
-            gHostAppearanceProxyModel = gRemoteCreationKey.instanceID;
-            proxy = CoopVisual::HasCellIndex(gHostAppearanceProxyIndex)
-                ? game->mCells.GetIfNotDeleted(gHostAppearanceProxyIndex) : nullptr;
-            if (!proxy) return;
-            gHostAppearanceProxyModel = gRemoteCreationKey.instanceID;
-            WriteProbeLog("Full host appearance proxy created for the guest player.");
-        }
-        const auto& position = player->GetPosition();
-        proxy->mIsIdle = true;
-        proxy->mIsInvulnerable = true;
-        proxy->field_112 = true;
-        proxy->mTargetPosition = position;
-        proxy->mTargetOrientation = player->mTargetOrientation;
-        proxy->mTransform = player->mTransform;
-        proxy->field_84 = position;
-        proxy->field_90 = Math::Vector3(0, 0, 0);
-        proxy->mTargetSize = player->mTargetSize;
-        proxy->mOpacity = 1.0f;
-        proxy->mTargetOpacity = 1.0f;
-
-        auto gfx = Simulator::Cell::cCellGFX::Get();
-        auto visual = gfx
-            ? gfx->mCellGFXObjects.GetIfNotDeleted(proxy->mGFXObjectIndex) : nullptr;
-        const bool proxyReady = visual && visual->mCellIndex == proxy->Index() &&
-            (visual->mpAnimatedCreature || visual->mpModel || visual->mNumStructureGFX > 0);
-        if (proxyReady && !gLocalPlayerHiddenByProxy)
-        {
-            gSavedLocalOpacity = player->mOpacity;
-            gSavedLocalTargetOpacity = player->mTargetOpacity;
-            gLocalPlayerHiddenByProxy = true;
-            gHiddenPlayerIndex = player->Index();
-            WriteProbeLog("Guest local cell now uses the complete host appearance.");
-        }
-        // Gameplay fades and cell updates can restore the native avatar's
-        // opacity. Keep it hidden for as long as the complete host proxy is
-        // ready, otherwise two differently coloured bodies overlap.
-        if (proxyReady && gLocalPlayerHiddenByProxy)
-        {
-            player->mOpacity = 0.0f;
-            player->mTargetOpacity = 0.0f;
-        }
-    }
 
     void RemoveMirroredNpcs(const char* reason)
     {
@@ -772,22 +1013,18 @@ namespace
         std::vector<CoopNet::NpcState> result;
         auto game = Simulator::Cell::cCellGame::Get();
         if (!game || !player) return result;
-        const auto& center = player->GetPosition();
         Simulator::cObjectPool_::Iterator iterator{};
         while (auto cell = game->mCells.Iterate(iterator))
         {
             if (cell == player || cell->Index() == gRemoteCellIndex ||
-                !cell->IsCreature() || !cell->mCellResource ||
+                cell->Index() == gHostAppearanceProxyIndex || !cell->mCellResource ||
                 cell->mCellResource->mInstanceID == 0) continue;
             const auto& position = cell->GetPosition();
-            const float dx = position.x - center.x;
-            const float dy = position.y - center.y;
-            const float radius = std::max(120.0f, player->mTransform.GetScale() * 80.0f);
-            if (dx * dx + dy * dy > radius * radius) continue;
             CoopNet::NpcState npc;
             npc.id = static_cast<std::uint32_t>(cell->Index());
             npc.cellResource = cell->mCellResource->mInstanceID;
-            npc.x = position.x; npc.y = position.y; npc.z = position.z;
+            const auto net = gWorldCoordinates.Encode({position.x,position.y,position.z});
+            npc.x = float(net.x); npc.y = float(net.y); npc.z = float(net.z);
             const auto orientation = cell->mTransform.GetRotation().ToQuaternion();
             const float planarLength = std::sqrt(orientation.z * orientation.z +
                 orientation.w * orientation.w);
@@ -796,24 +1033,22 @@ namespace
                 npc.qz = orientation.z / planarLength;
                 npc.qw = orientation.w / planarLength;
             }
-            npc.scale = std::max(0.001f, cell->mTransform.GetScale());
-            npc.targetSize = std::max(0.001f, cell->mTargetSize);
+            npc.scale = std::max(0.001f, cell->mTransform.GetScale()*float(gWorldCoordinates.unit));
+            // Zero means no animated resizing for food and fixed scenery.
+            npc.targetSize = std::max(0.0f, cell->mTargetSize*float(gWorldCoordinates.unit));
             npc.opacity = std::clamp(cell->mOpacity, 0.0f, 1.0f);
             npc.stageScale = std::clamp(static_cast<int>(cell->mScale), -1, 19);
             npc.modelInstance = cell->mModelKey.instanceID;
             npc.modelType = cell->mModelKey.typeID;
             npc.modelGroup = cell->mModelKey.groupID;
+            npc.health=std::clamp(cell->mHealthPoints,0,1000000);
+            npc.animation=std::clamp(static_cast<int>(cell->mCurrentAnimation),0,125);
+            npc.dead=cell->field_112; npc.elevation=cell->mRelativeElevation;
             result.push_back(npc);
         }
-        // Pool iteration order is unrelated to visibility; select the nearest
-        // creatures before applying the bounded network budget.
-        std::sort(result.begin(), result.end(), [&center](const auto& a, const auto& b) {
-            const float adx = a.x-center.x, ady = a.y-center.y;
-            const float bdx = b.x-center.x, bdy = b.y-center.y;
-            const float da = adx*adx + ady*ady, db = bdx*bdx + bdy*bdy;
-            return da == db ? a.id < b.id : da < db;
-        });
-        if (result.size() > 48) result.resize(48);
+        // The Cell pool holds 4096 entries; two slots belong to the players.
+        // Send every loaded object, including food, unlocks and scenery.
+        if (result.size() > 4094) result.resize(4094);
         return result;
     }
 
@@ -832,10 +1067,109 @@ namespace
         std::vector<Simulator::cObjectPoolIndex> remove;
         Simulator::cObjectPool_::Iterator iterator{};
         while (auto cell = game->mCells.Iterate(iterator))
-            if (cell->IsCreature() && retained.find(cell->Index()) == retained.end())
+            if (retained.find(cell->Index()) == retained.end())
                 remove.push_back(cell->Index());
         for (const auto index : remove)
             if (game->mCells.GetIfNotDeleted(index)) DestroyCell(index);
+    }
+
+    void UpdateHostAppearanceProxy(const CoopNet::Snapshot& snapshot,
+        Simulator::Cell::cCellObjectData* player)
+    {
+        if (CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) ||
+            !snapshot.inviteAccepted || !snapshot.hasRemotePosition ||
+            GetTickCount64() - snapshot.remotePositionReceivedTick > 2000 ||
+            !player || !gRemoteCreationKey.instanceID)
+        {
+            if (CoopVisual::HasCellIndex(gHostAppearanceProxyIndex))
+                RemoveHostAppearanceProxy("Host appearance proxy removed.");
+            return;
+        }
+        auto game = Simulator::Cell::cCellGame::Get();
+        if (!game) return;
+        // Compare the actual avatar's full appearance, not just the save's key.
+        // Equal IDs across profiles do not establish equal contents. Cache the
+        // comparison until either avatar/graphics or the incoming resource changes.
+        static Simulator::cObjectPoolIndex comparedCell = -1, comparedGfx = -1;
+        static ResourceKey comparedKey{};
+        static std::string comparedOwnerBlob;
+        static bool sameAppearance = false;
+        if (comparedCell != player->Index() || comparedGfx != player->mGFXObjectIndex ||
+            !SameResourceKey(comparedKey, player->mModelKey) ||
+            comparedOwnerBlob != snapshot.remoteAppearanceBlob)
+        {
+            comparedCell = player->Index();
+            comparedGfx = player->mGFXObjectIndex;
+            comparedKey = player->mModelKey;
+            comparedOwnerBlob = snapshot.remoteAppearanceBlob;
+            const auto localBlob = SerializeCreation(player->mModelKey);
+            sameAppearance = !localBlob.empty() && localBlob == comparedOwnerBlob;
+            char line[256]{};
+            sprintf_s(line, "ProxyAppearance: avatar=%d localModel=%08X ownerModel=%08X localBytes=%u ownerBytes=%u equal=%d",
+                player->Index(), player->mModelKey.instanceID, gRemoteCreationKey.instanceID,
+                static_cast<unsigned>(localBlob.size()), static_cast<unsigned>(comparedOwnerBlob.size()), sameAppearance);
+            WriteProbeLog(line);
+        }
+        if (sameAppearance)
+        {
+            RemoveHostAppearanceProxy("Local species already matches the world owner.");
+            return;
+        }
+        auto proxy = CoopVisual::HasCellIndex(gHostAppearanceProxyIndex)
+            ? game->mCells.GetIfNotDeleted(gHostAppearanceProxyIndex) : nullptr;
+        if (proxy && gHostAppearanceProxyModel != gRemoteCreationKey.instanceID)
+        {
+            RemoveHostAppearanceProxy("Host appearance changed; rebuilding local proxy.");
+            proxy = nullptr;
+        }
+        if (!proxy)
+        {
+            gHostAppearanceProxyIndex = CreatePlayerCellClone(player,
+                player->GetPosition(), true, &gRemoteCreationKey);
+            gHostAppearanceProxyModel = gRemoteCreationKey.instanceID;
+            proxy = CoopVisual::HasCellIndex(gHostAppearanceProxyIndex)
+                ? game->mCells.GetIfNotDeleted(gHostAppearanceProxyIndex) : nullptr;
+            if (!proxy) return;
+            gHostAppearanceProxyModel = gRemoteCreationKey.instanceID;
+            WriteProbeLog("Full host appearance proxy created for the guest player.");
+        }
+        const auto position = player->GetPosition();
+        proxy->mIsIdle = true;
+        proxy->mIsInvulnerable = true;
+        MoveCellBody(proxy, position, player->mTransform.GetRotation().ToQuaternion());
+        proxy->mTransform.SetScale(player->mTransform.GetScale());
+        proxy->mTargetSize = player->mTargetSize;
+        proxy->mOpacity = 1.0f;
+        proxy->mTargetOpacity = 1.0f;
+
+        auto gfx = Simulator::Cell::cCellGFX::Get();
+        auto visual = gfx
+            ? gfx->mCellGFXObjects.GetIfNotDeleted(proxy->mGFXObjectIndex) : nullptr;
+        const bool proxyReady = visual && visual->mCellIndex == proxy->Index() &&
+            (visual->mpAnimatedCreature || visual->mpModel || visual->mNumStructureGFX > 0);
+        if (!proxyReady && gLocalPlayerHiddenByProxy && player->Index() == gHiddenPlayerIndex)
+        {
+            player->mOpacity = gSavedLocalOpacity;
+            player->mTargetOpacity = gSavedLocalTargetOpacity;
+            gLocalPlayerHiddenByProxy = false;
+            gHiddenPlayerIndex = -1;
+        }
+        if (proxyReady && !gLocalPlayerHiddenByProxy)
+        {
+            gSavedLocalOpacity = player->mOpacity;
+            gSavedLocalTargetOpacity = player->mTargetOpacity;
+            gLocalPlayerHiddenByProxy = true;
+            gHiddenPlayerIndex = player->Index();
+            WriteProbeLog("Guest local cell now uses the complete host appearance.");
+        }
+        // Gameplay fades and cell updates can restore the native avatar's
+        // opacity. Keep it hidden for as long as the complete host proxy is
+        // ready, otherwise two differently coloured bodies overlap.
+        if (proxyReady && gLocalPlayerHiddenByProxy)
+        {
+            player->mOpacity = 0.0f;
+            player->mTargetOpacity = 0.0f;
+        }
     }
 
     void UpdateMirroredNpcs(const CoopNet::Snapshot& snapshot,
@@ -843,6 +1177,9 @@ namespace
     {
         auto game = Simulator::Cell::cCellGame::Get();
         const auto now = GetTickCount64();
+        // Native first-part scenes own temporary actors and camera targets.
+        // Deleting those as stray guest NPCs breaks the scene midway through.
+        if (IsPartCinematic(game)) return;
         if (!game || !player || !GetRemoveCellFunction() || !snapshot.inviteAccepted ||
             !snapshot.npcReceivedTick || now - snapshot.npcReceivedTick > 2000)
         {
@@ -863,9 +1200,16 @@ namespace
                     DestroyCell(mirror.cellIndex);
                 mirror = MirroredNpc{};
             }
+            mirror.pendingDamage.erase(std::remove_if(mirror.pendingDamage.begin(), mirror.pendingDamage.end(),
+                [&](const auto& event) { return event.first <= snapshot.worldActionAck; }), mirror.pendingDamage.end());
+            if (mirror.pendingRemoval && mirror.pendingRemoval <= snapshot.worldActionAck) mirror.pendingRemoval=0;
             // Mark presence even while its engine resource is still loading.
             // Otherwise the next cleanup pass destroys an asynchronous spawn.
             mirror.seenSequence = snapshot.npcSequence;
+            mirror.motion.Push(snapshot.npcSequence, snapshot.npcReceivedTick,
+                {gWorldCoordinates.Encode({state.x,state.y,state.z}),state.qz,state.qw},
+                state.scale*float(gWorldCoordinates.unit));
+            if (mirror.pendingRemoval) continue;
             auto cell = CoopVisual::HasCellIndex(mirror.cellIndex)
                 ? game->mCells.GetIfNotDeleted(mirror.cellIndex) : nullptr;
             if (!cell)
@@ -880,23 +1224,37 @@ namespace
                     continue;
                 const Math::Vector3 position(state.x, state.y, state.z);
                 mirror.cellIndex = CreateCellFromResource(loaded.get(),
-                    static_cast<Simulator::Cell::CellStageScale>(state.stageScale), position, &modelKey);
+                    static_cast<Simulator::Cell::CellStageScale>(state.stageScale), position, modelKey.instanceID ? &modelKey : nullptr, true);
                 mirror.resource = loaded;
                 mirror.modelKey = modelKey;
                 mirror.createdAt = now;
-                cell = game->mCells.GetIfNotDeleted(mirror.cellIndex);
+                cell = CoopVisual::HasCellIndex(mirror.cellIndex)
+                    ? game->mCells.GetIfNotDeleted(mirror.cellIndex) : nullptr;
                 if (!cell) continue;
-                cell->mIsInvulnerable = true;
+                cell->mIsInvulnerable = false;
+                mirror.appliedHealth = state.health;
             }
+            if (cell->mHealthPoints < mirror.appliedHealth && !state.dead)
+            {
+                CoopNet::WorldAction action; action.id=state.id; action.resource=state.cellResource;
+                action.damage=mirror.appliedHealth-std::max(0,cell->mHealthPoints);
+                mirror.pendingDamage.emplace_back(CoopNet::SubmitWorldAction(action),action.damage);
+            }
+            int pending=0; for (const auto& event:mirror.pendingDamage) pending+=event.second;
+            cell->mHealthPoints=std::max(0,state.health-pending);
+            mirror.appliedHealth=cell->mHealthPoints;
+            cell->field_112=state.dead;
+            cell->mRelativeElevation=state.elevation;
+            if (mirror.appliedAnimationSequence != snapshot.npcSequence &&
+                static_cast<std::uint32_t>(cell->mCurrentAnimation)!=state.animation)
+                cell->mCurrentAnimation=static_cast<Simulator::Cell::CellAnimations>(state.animation);
+            mirror.appliedAnimationSequence=snapshot.npcSequence;
             mirror.seenSequence = snapshot.npcSequence;
-            const Math::Vector3 position(state.x, state.y, state.z);
+            const auto pose = mirror.motion.Sample(now);
+            const auto point = gWorldCoordinates.Decode(pose.position);
+            const Math::Vector3 position(float(point.x), float(point.y), float(point.z));
             cell->mIsIdle = true;
-            cell->mTargetPosition = position;
-            cell->mTargetOrientation = Math::Quaternion(0, 0, state.qz, state.qw);
-            cell->mTransform.SetOffset(position);
-            cell->mTransform.SetRotation(Math::Quaternion(0, 0, state.qz, state.qw));
-            cell->field_84 = position;
-            cell->field_90 = Math::Vector3(0, 0, 0);
+            MoveCellBody(cell, position, Math::Quaternion(0, 0, pose.qz, pose.qw));
             cell->mTransform.SetScale(state.scale);
             cell->mTargetSize = state.targetSize;
             cell->mOpacity = state.opacity;
@@ -909,6 +1267,211 @@ namespace
                 game->mCells.GetIfNotDeleted(it->second.cellIndex))
                 DestroyCell(it->second.cellIndex);
             it = gMirroredNpcs.erase(it);
+        }
+    }
+
+    Simulator::Cell::cCellGFX::CellGFXObjectData* GetCellVisual(
+        Simulator::Cell::cCellObjectData* cell)
+    {
+        auto gfx = Simulator::Cell::cCellGFX::Get();
+        if (!gfx || !cell || !CoopVisual::HasCellIndex(cell->mGFXObjectIndex)) return nullptr;
+        auto visual = gfx->mCellGFXObjects.GetIfNotDeleted(cell->mGFXObjectIndex);
+        return visual && visual->mCellIndex == cell->Index() ? visual : nullptr;
+    }
+
+    struct VisualPosition
+    {
+        Math::Vector3 position{NAN, NAN, NAN};
+        float scale = NAN;
+        bool ready = false;
+    };
+
+    VisualPosition ReadVisualPosition(Simulator::Cell::cCellObjectData* cell)
+    {
+        auto visual = GetCellVisual(cell);
+        if (!visual) return {};
+        Graphics::Model* model = visual->mpModel.get();
+        if (!model && visual->mpAnimatedCreature) model = visual->mpAnimatedCreature->GetModel();
+        if (!model && visual->mpStructure)
+        {
+            cCellStructureResourcePtr reference;
+            auto structure = Simulator::Cell::GetData(visual->mpStructure, reference);
+            if (structure && structure->attachments)
+            {
+                const int count = std::min({10, visual->mNumStructureGFX, structure->numAttachments});
+                using Type = Simulator::Cell::cCellStructureResource::cSPAttachment::Type;
+                for (int i = 0; i < count && !model; ++i)
+                {
+                    auto object = visual->mStructureGFXs[i];
+                    const auto type = structure->attachments[i].type;
+                    if (!object) continue;
+                    if (type == Type::Model) model = static_cast<Graphics::Model*>(object);
+                    else if (type == Type::Creature || type == Type::RandomCreature || type == Type::PlayerCreature)
+                        model = static_cast<Anim::AnimatedCreature*>(object)->GetModel();
+                }
+            }
+        }
+        if (!model) return {};
+        const auto transform = model->GetTransform();
+        return {transform.GetOffset(), transform.GetScale(), true};
+    }
+
+    void TraceReplicaGraphics(const char* role,
+        Simulator::Cell::cCellObjectData* cell)
+    {
+        auto visual = GetCellVisual(cell);
+        if (!visual) return;
+        cCellStructureResourcePtr reference;
+        auto structure = visual->mpStructure
+            ? Simulator::Cell::GetData(visual->mpStructure, reference) : nullptr;
+        char line[384]{};
+        sprintf_s(line, "ReplicaGraphics: role=%s cell=%d anim=%d state118=%d health=%d hatchTime=%.3f gfx=%d attachments=%d onHatch=%08X onStartHatch=%08X dead=%d collider=%d requestedAnim=%d deathEffect=%08X",
+            role, cell->Index(), static_cast<int>(cell->mCurrentAnimation),
+            cell->field_118, cell->mHealthPoints, cell->mSpawnTime,
+            cell->mGFXObjectIndex, visual->mNumStructureGFX,
+            structure ? structure->onHatch : 0,
+            structure ? structure->onStartHatch : 0, cell->field_112, cell->field_364,
+            static_cast<int>(cell->field_18C), static_cast<unsigned>(visual->field_AC));
+        WriteProbeLog(line);
+        if (!structure || !structure->attachments) return;
+        const int count = std::min({10, visual->mNumStructureGFX, structure->numAttachments});
+        using Type = Simulator::Cell::cCellStructureResource::cSPAttachment::Type;
+        for (int i = 0; i < count; ++i)
+        {
+            const auto& attachment = structure->attachments[i];
+            void* object = visual->mStructureGFXs[i];
+            if (!object) continue;
+            if (attachment.type == Type::Effect)
+            {
+                auto effect = static_cast<Swarm::IVisualEffect*>(object);
+                sprintf_s(line, "ReplicaEffect: role=%s cell=%d slot=%d resource=%08X actual=%08X running=%d hidden=%d",
+                    role, cell->Index(), i, attachment.effectID,
+                    effect->GetEffectID(), effect->IsRunning(), effect->GetIsHidden());
+                WriteProbeLog(line);
+            }
+            else if (attachment.type == Type::Creature ||
+                attachment.type == Type::RandomCreature ||
+                attachment.type == Type::PlayerCreature)
+            {
+                uint32_t animationID = 0;
+                auto creature = static_cast<Anim::AnimatedCreature*>(object);
+                creature->GetCurrentAnimation(&animationID);
+                sprintf_s(line, "ReplicaCreature: role=%s cell=%d slot=%d animationID=%08X",
+                    role, cell->Index(), i, animationID);
+                WriteProbeLog(line);
+            }
+        }
+    }
+
+    void __cdecl CellGraphicsUpdateHook()
+    {
+        const auto snapshot = LocalWorldSnapshot(CoopNet::GetSnapshot());
+        auto player = GetLocalPlayerCell();
+        auto game = player ? Simulator::Cell::cCellGame::Get() : nullptr;
+        const auto now = GetTickCount64();
+        const bool active = game && snapshot.connected && snapshot.inviteAccepted &&
+            !snapshot.editorOpen && snapshot.hasRemotePosition &&
+            snapshot.connectionGeneration == gObservedConnectionGeneration &&
+            snapshot.worldGeneration == gObservedWorldGeneration &&
+            now - snapshot.remotePositionReceivedTick <= 2000;
+        Simulator::Cell::cCellObjectData* remote = nullptr;
+        Simulator::Cell::cCellObjectData* proxy = nullptr;
+        Math::Vector3 before{NAN, NAN, NAN};
+        if (active)
+        {
+            remote = CoopVisual::HasCellIndex(gRemoteCellIndex)
+                ? game->mCells.GetIfNotDeleted(gRemoteCellIndex) : nullptr;
+            proxy = CoopVisual::HasCellIndex(gHostAppearanceProxyIndex)
+                ? game->mCells.GetIfNotDeleted(gHostAppearanceProxyIndex) : nullptr;
+            // This boundary is after native simulation and before structure
+            // graphics. Reapply only existing bodies; no spawning, deletion or
+            // resource loading takes place inside the rendering update.
+            if (remote && remote != player)
+            {
+                before = remote->GetPosition();
+                const auto& p = snapshot.remotePose;
+                MoveCellBody(remote, Math::Vector3(snapshot.remoteX, snapshot.remoteY, snapshot.remoteZ),
+                    Math::Quaternion(p.qx, p.qy, p.qz, p.qw));
+                const auto size = CoopVisual::SharedSize(CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()),
+                    player->mTransform.GetScale(), player->mTargetSize, snapshot);
+                remote->mTransform.SetScale(size.scale);
+                remote->mTargetSize = size.target;
+                remote->mOpacity = remote->mTargetOpacity = p.visible ? 1.0f : 0.0f;
+            }
+            if (proxy && proxy != player && gLocalPlayerHiddenByProxy &&
+                player->Index() == gHiddenPlayerIndex)
+            {
+                MoveCellBody(proxy, player->GetPosition(), player->mTransform.GetRotation().ToQuaternion());
+                proxy->mTransform.SetScale(player->mTransform.GetScale());
+                player->mOpacity = player->mTargetOpacity = 0.0f;
+                proxy->mOpacity = proxy->mTargetOpacity = 1.0f;
+            }
+            if (!CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) &&
+                !IsPartCinematic(game) &&
+                snapshot.npcReceivedTick && now - snapshot.npcReceivedTick <= 2000)
+            {
+                for (const auto& state : snapshot.remoteNpcs)
+                {
+                    auto it = gMirroredNpcs.find(state.id);
+                    if (it == gMirroredNpcs.end() || !CoopVisual::HasCellIndex(it->second.cellIndex)) continue;
+                    auto cell = game->mCells.GetIfNotDeleted(it->second.cellIndex);
+                    if (cell && cell != player && cell != remote && cell != proxy && !it->second.pendingRemoval)
+                    {
+                        const auto pose = it->second.motion.Sample(now);
+                        const auto point = gWorldCoordinates.Decode(pose.position);
+                        MoveCellBody(cell, Math::Vector3(float(point.x),float(point.y),float(point.z)),
+                            Math::Quaternion(0, 0, pose.qz, pose.qw));
+                    }
+                }
+            }
+        }
+        gCellGraphicsUpdateOriginal();
+        static ULONG64 lastTrace = 0;
+        static const bool trace = GetEnvironmentVariableA("SPORE_COOP_TRACE_MOVEMENT", nullptr, 0) != 0;
+        if (trace && active && now - lastTrace >= 2000)
+        {
+            lastTrace = now;
+            const auto remoteVisual = ReadVisualPosition(remote);
+            const auto localVisual = ReadVisualPosition(player);
+            const auto proxyVisual = ReadVisualPosition(proxy);
+            const Math::Vector3 absent{NAN, NAN, NAN};
+            const auto remotePosition = remote ? remote->GetPosition() : absent;
+            const auto proxyPosition = proxy ? proxy->GetPosition() : absent;
+            char line[640]{};
+            sprintf_s(line, "Sync: phase=after-cell-gfx seq=%llu age=%llu received=(%.3f,%.3f) before=(%.3f,%.3f) cell=(%.3f,%.3f) gfx=(%.3f,%.3f) gfxReady=%d nodes=%d scale=%.3f gfxScale=%.3f",
+                static_cast<unsigned long long>(snapshot.remotePositionSequence),
+                static_cast<unsigned long long>(now - snapshot.remotePositionReceivedTick),
+                snapshot.remoteX, snapshot.remoteY, before.x, before.y, remotePosition.x, remotePosition.y,
+                remoteVisual.position.x, remoteVisual.position.y, remoteVisual.ready,
+                remote ? remote->field_250 : 0, remote ? remote->mTransform.GetScale() : 0, remoteVisual.scale);
+            WriteProbeLog(line);
+            sprintf_s(line, "LocalVisual: avatar=%d local=(%.3f,%.3f) localGfx=(%.3f,%.3f) hidden=%d proxy=%d proxyCell=(%.3f,%.3f) proxyGfx=(%.3f,%.3f) proxyReady=%d npcs=%u/%u",
+                player->Index(), player->GetPosition().x, player->GetPosition().y,
+                localVisual.position.x, localVisual.position.y, gLocalPlayerHiddenByProxy,
+                gHostAppearanceProxyIndex, proxyPosition.x, proxyPosition.y,
+                proxyVisual.position.x, proxyVisual.position.y, proxyVisual.ready,
+                static_cast<unsigned>(gMirroredNpcs.size()), static_cast<unsigned>(snapshot.remoteNpcs.size()));
+            WriteProbeLog(line);
+            sprintf_s(line, "ReplicaPhysics: avatar=%d avatarCollider=%d proxy=%d proxyCollider=%d separation=%.4f impulse=(%.4f,%.4f)",
+                player->Index(), player->field_364, gHostAppearanceProxyIndex,
+                proxy ? proxy->field_364 : -1,
+                proxy ? std::hypot(proxyPosition.x - player->GetPosition().x,
+                    proxyPosition.y - player->GetPosition().y) : NAN,
+                player->field_90.x, player->field_90.y);
+            WriteProbeLog(line);
+            TraceReplicaGraphics("remote", remote);
+            TraceReplicaGraphics("local-proxy", proxy);
+            if (!CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()))
+            {
+                int traced = 0;
+                for (const auto& item : gMirroredNpcs)
+                {
+                    if (traced++ >= 2) break;
+                    auto npc = CoopVisual::HasCellIndex(item.second.cellIndex)
+                        ? game->mCells.GetIfNotDeleted(item.second.cellIndex) : nullptr;
+                    TraceReplicaGraphics("npc", npc);
+                }
+            }
         }
     }
 
@@ -985,7 +1548,8 @@ namespace
         AppendBinary(bytes, magic);
         AppendBinary(bytes, count);
         AppendBinary(bytes, resource->mProperties);
-        for (const auto& block : resource->mBlocks) AppendBinary(bytes, block);
+        for (const auto& block : resource->mBlocks)
+            AppendBinary(bytes, block);
         if (bytes.size() > 262144) return {};
         return Base64Encode(bytes);
     }
@@ -1030,6 +1594,16 @@ namespace
         auto editor = Editors::GetEditor();
         if (!editor || !editor->IsActive() || !editor->GetEditorModel()) return {};
 
+        // Native history is the completed transaction (including undo/redo).
+        // A selected/hovered handle must not block sending an already placed
+        // part, nor may a palette drag publish a half-constructed body.
+        const int index = CoopEditor::HistorySlot(editor->mEditHistoryIndex,editor->mEditHistory.size());
+        if (!gEditorHistoryPending && index >= 0 &&
+            index < static_cast<int>(editor->mEditHistory.size()) && editor->mEditHistory[index])
+            return SerializeEditorResource(editor->mEditHistory[index].get());
+        if (!editor->GetEditorModel()->mbAllBlocksLoaded || editor->mpMovingPart ||
+            editor->mMouseState.IsLeftButtonDown) return {};
+
         cEditorResourcePtr resource = new Editors::cEditorResource();
         editor->GetEditorModel()->Save(resource.get());
         return SerializeEditorResource(resource.get());
@@ -1038,30 +1612,56 @@ namespace
     bool ApplyEditorModel(const std::string& blob)
     {
         auto editor = Editors::GetEditor();
-        if (!editor || !editor->IsActive() || !editor->GetEditorModel()) return false;
+        if (!editor || !editor->IsActive() || !editor->GetEditorModel() ||
+            !editor->GetEditorModel()->mbAllBlocksLoaded || editor->mpMovingPart ||
+            editor->mMouseState.IsLeftButtonDown)
+            return false;
         cEditorResourcePtr resource = new Editors::cEditorResource();
-        if (!DeserializeEditorResource(blob, resource.get())) return false;
+        if (!DeserializeEditorResource(blob, resource.get()) || resource->mBlocks.empty()) return false;
 
-        auto model = editor->GetEditorModel();
+        // SetEditorModel first calls Dispose on the CURRENT model (586BF7).
+        // Loading into that same object then reattaching it destroys its body.
+        // Load a separate model; SetEditorModel acquires its native reference.
+        auto model = new Editors::EditorModel();
+        auto previous = editor->GetEditorModel();
+        model->mKey = previous->mKey;
         model->Load(resource.get());
+        if (model->mRigblocks.empty()) { delete model; return false; }
+        // SCP1 carries body and paint; names are local editor metadata. Load
+        // clears them, so preserve them before the old model is disposed.
+        model->mName = previous->mName;
+        model->mDescription = previous->mDescription;
+        model->mAcceptedName = previous->mAcceptedName;
         editor->SetEditorModel(model);
-        editor->CommitEditHistory(true);
+        model->mSkinNeedsUpdating = true;
+        gEditorHistoryPending = true;
+        gObservedEditorModel = model;
+        gEditorModelReadySince = GetTickCount64();
         WriteProbeLog("Applied a remote editor model snapshot.");
         return true;
     }
 
-    void OpenMirroredEditor(uint32_t editorID)
+    bool OpenMirroredEditor(const CoopNet::Snapshot& snapshot)
     {
-        if (!Simulator::IsCellGame()) return;
+        if (!Simulator::IsCellGame()) return false;
         auto game = Simulator::Cell::cCellGame::Get();
         auto data = game ? game->mpSerializableData.get() : nullptr;
-        if (!data) return;
+        const auto& native = GetCellProgressFunctions();
+        if (!data || !GetLocalPlayerCell() || !native.Ready() || snapshot.speciesBlob.empty()) return false;
 
-        Simulator::EnterEditorMessage message(editorID, data->mPlayerCreatureKey);
+        ResourceKey sharedKey;
+        if (!CacheVisualModel(snapshot.speciesBlob, data->mPlayerCreatureKey, sharedKey, gEditorEntryResource))
+            return false;
+        data->mPlayerCreatureKey = sharedKey;
+        gEditorEntrySpeciesSequence = snapshot.speciesSequence;
+        gEditorInitialModelPending = true;
         gSuppressEditorRelay = true;
-        MessageManager.MessageSend(Simulator::kMsgEnterEditor, &message);
+        // Cell bypasses kMsgEnterEditor. Its native campaign entry prepares
+        // the palette, DNA budget, editor settings and return-to-Cell callback.
+        native.enterEditor(false);
         gSuppressEditorRelay = false;
-        WriteProbeLog("Opened the mirrored cooperative editor.");
+        WriteProbeLog("Requested native Cell campaign editor with the complete shared species.");
+        return true;
     }
 
     class EditorRelayListener : public App::DefaultMessageListener
@@ -1074,7 +1674,7 @@ namespace
             const auto snapshot = CoopNet::GetSnapshot();
             if (!snapshot.enabled || !snapshot.connected || !snapshot.inviteAccepted) return false;
             const auto* message = static_cast<Simulator::EnterEditorMessage*>(value);
-            CoopNet::SubmitEditorOpen(message->mEditorID);
+            CoopNet::SubmitEditorOpen(message->mEditorID, SerializeCreation(message->mCreationName));
             WriteProbeLog("Relayed local editor entry to the cooperative peer.");
             return false;
         }
@@ -1085,12 +1685,37 @@ namespace
         if (!snapshot.inviteAccepted)
         {
             gWasEditorMode = false;
+            gObservedEditorModel = nullptr;
+            gEditorHistoryPending = false;
+            gEditorInitialModelPending = false;
             gMirroredEditorRequestID = 0;
             gMirroredEditorRequestTick = 0;
             return;
         }
         auto editor = Editors::GetEditor();
         const bool editorActive = Simulator::IsEditorMode() && editor && editor->IsActive();
+        auto model = editorActive ? editor->GetEditorModel() : nullptr;
+        if (model != gObservedEditorModel)
+        {
+            gObservedEditorModel = model;
+            gEditorModelReadySince = now;
+        }
+        const bool editorReady = model && model->mbAllBlocksLoaded && !model->mRigblocks.empty() &&
+            now - gEditorModelReadySince >= 750;
+        static ULONG64 lastEditorTrace = 0;
+        if (editorActive && now-lastEditorTrace >= 2000)
+        {
+            char line[384]{};
+            sprintf_s(line,"EditorSync: ready=%d blocks=%u loaded=%d moving=%d handle=%d mouse=%u history=%d/%u initial=%d open=%d seq=%llu applied=%llu pending=%llu ack=%llu",
+                editorReady,model ? unsigned(model->mRigblocks.size()) : 0,
+                model ? model->mbAllBlocksLoaded : 0,editor->mpMovingPart ? 1 : 0,
+                editor->mpActiveHandle ? 1 : 0,editor->mMouseState.value,
+                editor->mEditHistoryIndex,unsigned(editor->mEditHistory.size()),gEditorInitialModelPending,
+                snapshot.editorOpen,snapshot.speciesSequence,gAppliedSpeciesSequence,
+                gPendingSpeciesSequence,snapshot.speciesAck);
+            WriteProbeLog(line);
+            lastEditorTrace = now;
+        }
 
         if (editorActive || !snapshot.editorOpen)
         {
@@ -1109,38 +1734,117 @@ namespace
             {
                 gMirroredEditorRequestID = snapshot.editorID;
                 gMirroredEditorRequestTick = now;
-                OpenMirroredEditor(snapshot.editorID);
+                OpenMirroredEditor(snapshot);
             }
             return;
         }
 
-        if (editorActive && !gWasEditorMode && !snapshot.editorOpen)
-            CoopNet::SubmitEditorOpen(editor->mEditorName);
-
-        if (editorActive && snapshot.speciesSequence > gAppliedSpeciesSequence &&
-            !snapshot.speciesBlob.empty() && snapshot.speciesBlob != gLastLocalSpecies)
+        // IsActive becomes true before the body has finished loading.
+        if (editorActive && !editorReady) return;
+        if (editorActive && !gWasEditorMode && snapshot.editorOpen &&
+            snapshot.editorRole != CoopNet::GetRole())
+            gEditorInitialModelPending = true;
+        if (editorReady && gEditorHistoryPending)
         {
-            if (ApplyEditorModel(snapshot.speciesBlob))
+            editor->CommitEditHistory(true);
+            gEditorHistoryPending = false;
+        }
+        // A cache key handed to the campaign entry is not proof that the
+        // editor loaded it. Cell can fall back to a default green body. Apply
+        // the authoritative resource explicitly before this peer can publish.
+        if (editorActive && gEditorInitialModelPending)
+        {
+            if (snapshot.speciesBlob.empty() || !ApplyEditorModel(snapshot.speciesBlob)) return;
+            gAppliedSpeciesSequence = snapshot.speciesSequence;
+            gEditorEntrySpeciesSequence = snapshot.speciesSequence;
+            gLastLocalSpecies = snapshot.speciesBlob;
+            gPendingSpeciesSequence = 0; gPendingSpecies.clear();
+            gEditorInitialModelPending = false;
+            gWasEditorMode = true;
+            WriteProbeLog("EditorSync: authoritative entry body installed; waiting for native body load.");
+            return;
+        }
+        if (editorActive && !gWasEditorMode)
+        {
+            gLastLocalSpecies=SerializeEditorModel();
+            gPendingSpeciesSequence=0; gPendingSpecies.clear();
+            if (snapshot.editorOpen)
+                gAppliedSpeciesSequence = snapshot.editorRole == CoopNet::GetRole()
+                    ? snapshot.speciesSequence : gEditorEntrySpeciesSequence;
+            if (!snapshot.editorOpen)
             {
-                gLastLocalSpecies = snapshot.speciesBlob;
+                // Until the server acknowledges this entry, its closed-editor
+                // species belongs to the previous visit. Do not reload that
+                // old body/paint while the new editor is opening.
                 gAppliedSpeciesSequence = snapshot.speciesSequence;
+                CoopNet::SubmitEditorOpen(editor->mEditorName,gLastLocalSpecies);
             }
         }
 
-        if (editorActive && now - gLastSpeciesTick >= 250)
+        // A final model must still arrive while the other window is finishing
+        // its native save/exit transition. Do not stop receiving it merely
+        // because the server has already released its editor flag.
+        if (editorActive && !snapshot.editorOpen && gWasEditorMode &&
+            snapshot.speciesSequence > gAppliedSpeciesSequence && !snapshot.speciesBlob.empty() &&
+            !editor->mpMovingPart && !editor->mMouseState.IsLeftButtonDown)
         {
-            const std::string current = SerializeEditorModel();
-            if (!current.empty() && current != gLastLocalSpecies)
+            if (ApplyEditorModel(snapshot.speciesBlob))
             {
-                gLastLocalSpecies = current;
-                CoopNet::SubmitSpecies(current);
+                gLastLocalSpecies=snapshot.speciesBlob;
+                gAppliedSpeciesSequence=snapshot.speciesSequence;
+                gPendingSpeciesSequence=0; gPendingSpecies.clear();
             }
-            gLastSpeciesTick = now;
+        }
+
+        if (editorActive && snapshot.editorOpen && now-gLastSpeciesTick>=100)
+        {
+            auto current=SerializeEditorModel();
+            if (gPendingSpeciesSequence && snapshot.speciesAck>=gPendingSpeciesSequence)
+            {
+                if (!snapshot.speciesConflict) gLastLocalSpecies=gPendingSpecies;
+                gPendingSpeciesSequence=0; gPendingSpecies.clear();
+            }
+            if (!gPendingSpeciesSequence && !current.empty())
+            {
+                if (snapshot.speciesSequence>gAppliedSpeciesSequence && !snapshot.speciesBlob.empty())
+                {
+                    std::vector<unsigned char> base,local,remote,merged;
+                    Base64Decode(gLastLocalSpecies,base); Base64Decode(current,local);
+                    Base64Decode(snapshot.speciesBlob,remote);
+                    if (CoopEditor::Merge(base,local,remote,merged))
+                    {
+                        const auto value=Base64Encode(merged);
+                        if (value==current || ApplyEditorModel(value))
+                        {
+                            current=value; gLastLocalSpecies=snapshot.speciesBlob;
+                            gAppliedSpeciesSequence=snapshot.speciesSequence;
+                        }
+                    }
+                    else WriteProbeLog("Editor topology conflict: preserving local model; finish the current edit before retrying.");
+                }
+                if (gAppliedSpeciesSequence==snapshot.speciesSequence && current!=gLastLocalSpecies)
+                {
+                    gPendingSpecies=current;
+                    gPendingSpeciesSequence=CoopNet::SubmitSpecies(current,gAppliedSpeciesSequence);
+                    char line[160]{};
+                    sprintf_s(line,"EditorSync: sent committed model client=%llu base=%llu bytes=%u",
+                        gPendingSpeciesSequence,gAppliedSpeciesSequence,unsigned(current.size()));
+                    WriteProbeLog(line);
+                }
+            }
+            gLastSpeciesTick=now;
         }
 
         if (!editorActive && gWasEditorMode)
         {
-            CoopNet::SubmitEditorClose(gLastLocalSpecies);
+            auto game=Simulator::Cell::cCellGame::Get();
+            auto data=game ? game->mpSerializableData.get() : nullptr;
+            auto saved=data ? SerializeCreation(data->mPlayerCreatureKey) : std::string{};
+            CoopNet::SubmitEditorClose(saved.empty() ? (gPendingSpecies.empty() ? gLastLocalSpecies : gPendingSpecies) : saved);
+            gPendingSpeciesSequence=0; gPendingSpecies.clear();
+            gJoinedPlayerPlaced=false;
+            gWorldCoordinates = CoopWorld::Coordinates{};
+            gEditorEntryResource = nullptr;
             gLastLocalSpecies.clear();
             gAppliedSpeciesSequence = 0;
             gLastSubmittedAppearanceKey = ResourceKey{};
@@ -1156,6 +1860,7 @@ namespace
     constexpr uint32_t kInvitePickerTitleID = 0x5C0F1004;
     constexpr uint32_t kInvitePlayerButtonID = 0x5C0F1005;
     constexpr uint32_t kInvitePickerCancelButtonID = 0x5C0F1006;
+    constexpr uint32_t kSessionEndedOkID = 0x5C0F1013;
 
     const char16_t* CoopText(const char16_t* english, const char16_t* russian)
     {
@@ -1173,6 +1878,9 @@ namespace
             if (!window || !message.IsType(UTFWin::kMsgButtonClick)) return false;
             switch (window->GetControlID())
             {
+            case kSessionEndedOkID:
+                CoopNet::AcknowledgeSessionEnd();
+                return true;
             case kInviteButtonID:
                 // Do not send immediately.  Even the local two-window test has
                 // a real recipient picker, which makes the later VPN flow match
@@ -1879,9 +2587,41 @@ namespace
             });
     }
 
+    void UpdateSessionEndedUI(const CoopNet::Snapshot& snapshot)
+    {
+        auto root = WindowManager.GetMainWindow();
+        if (snapshot.sessionEnded && root && !gSessionEndedPanel)
+        {
+            gSessionEndedPanel = CreateCoopPanel(0x5C0F1011);
+            gSessionEndedTitle = CreateCoopButton(0x5C0F1012, u"", CoopUi::Style::Label);
+            gSessionEndedOk = CreateCoopButton(kSessionEndedOkID, u"OK");
+        }
+        if (snapshot.sessionEnded && root)
+        {
+            const auto area = root->GetArea();
+            const float left = (area.GetWidth() - 390) * 0.5f;
+            const float top = (area.GetHeight() - 150) * 0.5f;
+            if (gSessionEndedPanel) gSessionEndedPanel->SetArea({left,top,left+390,top+150});
+            if (gSessionEndedTitle)
+            {
+                gSessionEndedTitle->SetArea({left+15,top+20,left+375,top+66});
+                gSessionEndedTitle->SetCaption(snapshot.disconnectReason == "host_left"
+                    ? u"\u0425\u043e\u0441\u0442 \u0432\u044b\u0448\u0435\u043b"
+                    : u"\u0421\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0442\u0435\u0440\u044f\u043d\u043e");
+            }
+            if (gSessionEndedOk) gSessionEndedOk->SetArea({left+120,top+89,left+270,top+130});
+        }
+        for (auto window : {gSessionEndedPanel.get(),gSessionEndedTitle.get(),gSessionEndedOk.get()})
+        {
+            SetButtonVisible(window,snapshot.sessionEnded);
+            if (window && root && snapshot.sessionEnded) root->BringToFront(window);
+        }
+    }
+
     void CoopUpdate()
     {
-        const auto snapshot = CoopNet::GetSnapshot();
+        const auto snapshot = LocalWorldSnapshot(CoopNet::GetSnapshot());
+        UpdateSessionEndedUI(snapshot);
         if (!snapshot.enabled || !snapshot.connected)
         {
             SetButtonVisible(gInviteButton.get(), false);
@@ -1915,6 +2655,7 @@ namespace
             gProgressSeedSent = false;
             gProgressSync.Reset();
             gAppliedSpeciesSequence = 0;
+            gPendingSpeciesSequence=0; gPendingSpecies.clear();
             gLastLocalSpecies.clear();
             gLastSpeciesTick = 0;
             gInviteResponseSent = false;
@@ -1953,7 +2694,13 @@ namespace
         if (snapshot.worldGeneration != gObservedWorldGeneration)
         {
             gObservedWorldGeneration = snapshot.worldGeneration;
+            gWorldActionApplied = 0;
             gProgressSync.Reset();
+            gAppliedSpeciesSequence=0; gPendingSpeciesSequence=0; gPendingSpecies.clear();
+            gEditorInitialModelPending = false;
+            gEditorEntrySpeciesSequence = 0;
+            gWasEditorMode = false;
+            gLastLocalSpecies.clear();
             gProgressSeedSent = false;
             gJoinedPlayerPlaced = false;
             gAutoJoinAttempted = false;
@@ -2010,11 +2757,9 @@ namespace
                     {
                         const Math::Vector3 spawn(snapshot.remoteX + std::max(2.0f, snapshot.remoteScale * 4.0f),
                             snapshot.remoteY, snapshot.remoteZ);
-                        player->mTransform.SetOffset(spawn);
-                        player->mTargetPosition = spawn;
-                        player->field_84 = spawn;
-                        player->field_90 = Math::Vector3(0, 0, 0);
-                        WriteProbeLog("Joining player placed beside owner; local input remains native.");
+                        if (!MoveCellBody(player, spawn, player->mTransform.GetRotation().ToQuaternion()))
+                            return;
+                        WriteProbeLog("Joining player and physics body placed beside owner; local input remains native.");
                     }
                     gJoinedPlayerPlaced = true;
                 }
@@ -2028,41 +2773,32 @@ namespace
                 {
                     char line[512]{};
                     auto time = Simulator::cGameTimeManager::Get();
-                    sprintf_s(line, "Movement: role=%s avatar=%d x=%.3f y=%.3f z=%.3f accepted=%d pause=%d ownedPause=%d menuPause=%d tutorialPause=%d remoteLoaded=%d remoteRegistered=%d scale=%.3f",
+                    DWORD foregroundPID = 0;
+                    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPID);
+                    sprintf_s(line, "Movement: role=%s avatar=%d x=%.3f y=%.3f z=%.3f target=(%.3f,%.3f) impulse=(%.3f,%.3f) focused=%d accepted=%d pause=%d ownedPause=%d menuPause=%d tutorialPause=%d remoteLoaded=%d remoteRegistered=%d scale=%.3f worldUnit=%.6f",
                         CoopNet::GetRole(), player->Index(), position.x, position.y, position.z,
+                        player->mTargetPosition.x, player->mTargetPosition.y,
+                        player->field_90.x, player->field_90.y,
+                        foregroundPID == GetCurrentProcessId(),
                         snapshot.inviteAccepted, time ? time->IsPaused() : -1, gCoopPause.applied,
                         time ? time->GetPauseCount(Simulator::TimeManagerPause::UIToggle) : -1,
                         time ? time->GetPauseCount(Simulator::TimeManagerPause::Tutorial) : -1,
-                        CoopVisual::HasCellIndex(gRemoteCellIndex) ? 1 : 0,
-                        CoopVisual::HasCellIndex(gRemoteCellIndex) ? 1 : 0,
-                        player->mTransform.GetScale());
-                    WriteProbeLog(line);
-                    auto remote = CoopVisual::HasCellIndex(gRemoteCellIndex)
-                        ? game->mCells.GetIfNotDeleted(gRemoteCellIndex) : nullptr;
-                    auto localPose = ReadPlayerRenderPose(player);
-                    auto remotePose = remote ? ReadPlayerRenderPose(remote) : CoopNet::CellPose{};
-                    sprintf_s(line, "Sync: seq=%llu age=%llu received=(%.2f,%.2f,%.2f) cell=(%.2f,%.2f) gfx=(%.2f,%.2f) localGfx=(%.2f,%.2f) cellScale=%.3f renderScale=%.3f npcs=%u/%u progress=%llu food=%d parts=%d,%d,%d,%d,%d,%d",
-                        static_cast<unsigned long long>(snapshot.remotePositionSequence),
-                        static_cast<unsigned long long>(now - snapshot.remotePositionReceivedTick),
-                        snapshot.remoteX, snapshot.remoteY, snapshot.remoteZ,
-                        remote ? remote->GetPosition().x : 0, remote ? remote->GetPosition().y : 0,
-                        remotePose.x, remotePose.y, localPose.x, localPose.y,
-                        snapshot.remoteScale, snapshot.remotePose.scale,
-                        static_cast<unsigned>(gMirroredNpcs.size()), static_cast<unsigned>(snapshot.remoteNpcs.size()),
-                        static_cast<unsigned long long>(snapshot.revision), data ? data->mFoodProgression : -1,
-                        data ? data->mUnlockedParts[0] : -1, data ? data->mUnlockedParts[1] : -1,
-                        data ? data->mUnlockedParts[2] : -1, data ? data->mUnlockedParts[3] : -1,
-                        data ? data->mUnlockedParts[4] : -1, data ? data->mUnlockedParts[5] : -1);
+                        CoopVisual::HasCellIndex(gRemoteCellIndex) && game->mCells.GetIfNotDeleted(gRemoteCellIndex) ? 1 : 0,
+                        CoopVisual::HasCellIndex(gRemoteCellIndex) && GetCellVisual(game->mCells.GetIfNotDeleted(gRemoteCellIndex)) ? 1 : 0,
+                        player->mTransform.GetScale(),gWorldCoordinates.unit);
                     WriteProbeLog(line);
                     lastMovementTrace = now;
                 }
                 auto renderPose = ReadPlayerRenderPose(player);
+                const auto networkPosition = gWorldCoordinates.Encode({position.x,position.y,position.z});
+                renderPose.x=float(networkPosition.x); renderPose.y=float(networkPosition.y); renderPose.z=float(networkPosition.z);
+                renderPose.scale *= float(gWorldCoordinates.unit);
                 if (gLocalPlayerHiddenByProxy) renderPose.visible = true;
-                CoopNet::SubmitPosition(position.x, position.y, position.z,
+                CoopNet::SubmitPosition(float(networkPosition.x), float(networkPosition.y), float(networkPosition.z),
                     speciesKey.instanceID, speciesKey.typeID,
                     speciesKey.groupID,
                     player->mCellResource ? player->mCellResource->mInstanceID : 0,
-                    player->mTransform.GetScale(), player->mTargetSize,
+                    player->mTransform.GetScale()*float(gWorldCoordinates.unit), player->mTargetSize*float(gWorldCoordinates.unit),
                     gLocalPlayerHiddenByProxy ? 1.0f : player->mOpacity, &renderPose);
                 gLastPositionTick = now;
             }
@@ -2071,9 +2807,11 @@ namespace
             if (snapshot.inviteAccepted &&
                 CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()))
             {
-                if (now - gLastNpcSnapshotTick >= 200)
+                ApplyWorldActions();
+                if (now - gLastNpcSnapshotTick >= 100 &&
+                    !IsPartCinematic(Simulator::Cell::cCellGame::Get()))
                 {
-                    CoopNet::SubmitNpcSnapshot(ReadAuthoritativeNpcs(player));
+                    CoopNet::SubmitNpcSnapshot(ReadAuthoritativeNpcs(player),gWorldActionApplied);
                     gLastNpcSnapshotTick = now;
                 }
                 RemoveMirroredNpcs("this window owns the world");
@@ -2283,6 +3021,18 @@ namespace
         WriteProbeLog("Native build: " __DATE__ " " __TIME__ "; registered peer renderer.");
         WriteProbeLog(GetRemoveCellFunction() ? "Verified native Cell removal ABI; complete cell cleanup enabled."
             : "Unsupported Cell removal ABI; network cell creation is disabled for this executable.");
+        WriteProbeLog(GetCellMotionFunctions().Ready() && gCellGraphicsHookAttached
+            ? "Verified native Cell movement ABI; articulated body movement and pre-graphics synchronization enabled."
+            : "Unsupported Cell movement ABI or graphics hook; network cell creation is disabled.");
+        WriteProbeLog(GetUnregisterCollisionFunction()
+            ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
+            : "Unsupported collision isolation ABI; network cell creation is disabled.");
+        WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
+            ? "Protocol 4: verified world-growth coordinates and shared object interactions enabled."
+            : "World growth/removal hook unavailable; shared world adapter cannot run.");
+        WriteProbeLog(GetCellProgressFunctions().Ready()
+            ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
+            : "Unsupported Cell progress ABI; shared native progression and mirrored editor entry disabled.");
         WriteProbeLog(networkEnabled
             ? "Initialize completed; commands registered and cooperative client started."
             : "Initialize completed; commands registered; cooperative client disabled (no environment)."
@@ -2295,6 +3045,22 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         PrepareDetours(module);
+        if (GetCellMotionFunctions().Ready())
+        {
+            gCellGraphicsUpdateOriginal = reinterpret_cast<CellGraphicsUpdateFunction>(VerifiedMotionCode(
+                CoopEngine::kGraphicsRva, CoopEngine::kGraphicsSize, CoopEngine::kGraphicsHash,
+                CoopEngine::kGraphicsRelocations));
+            if (gCellGraphicsUpdateOriginal)
+                gCellGraphicsHookAttached = DetourAttach(reinterpret_cast<PVOID*>(&gCellGraphicsUpdateOriginal),
+                    CellGraphicsUpdateHook) == NO_ERROR;
+        }
+        gWorldRemoveOriginal = GetRemoveCellFunction();
+        if (gWorldRemoveOriginal)
+            gWorldRemovalHookAttached = DetourAttach(reinterpret_cast<PVOID*>(&gWorldRemoveOriginal), WorldRemoveHook) == NO_ERROR;
+        gCellGrowthOriginal = VerifiedMotionCode(CoopEngine::kGrowthRva,
+            CoopEngine::kGrowthSize, CoopEngine::kGrowthHash, CoopEngine::kGrowthRelocations);
+        if (gCellGrowthOriginal)
+            gCellGrowthHookAttached = DetourAttach(reinterpret_cast<PVOID*>(&gCellGrowthOriginal), CellGrowthHook) == NO_ERROR;
         if (IsProfile2())
         {
             gCreateMutexAOriginal = reinterpret_cast<CreateMutexAFunction>(
@@ -2307,12 +3073,18 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             }
         }
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        CommitDetours();
+        if (CommitDetours() != NO_ERROR) { gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
         PrepareDetours(module);
+        if (gCellGraphicsHookAttached)
+            DetourDetach(reinterpret_cast<PVOID*>(&gCellGraphicsUpdateOriginal), CellGraphicsUpdateHook);
+        if (gWorldRemovalHookAttached)
+            DetourDetach(reinterpret_cast<PVOID*>(&gWorldRemoveOriginal), WorldRemoveHook);
+        if (gCellGrowthHookAttached)
+            DetourDetach(reinterpret_cast<PVOID*>(&gCellGrowthOriginal), CellGrowthHook);
         if (gMutexDetourAttached)
         {
             DetourDetach(reinterpret_cast<PVOID*>(&gCreateMutexAOriginal),

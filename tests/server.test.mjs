@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 3, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 4, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -188,22 +188,41 @@ try {
   check(state.inviteAccepted && acceptedInvite.inviteAccepted && !state.invitePending,
     'Accepted invitation unlocks automatic world joining');
   const npcFrame = [
-    0x80000001, 123456, 12, 34, 0, 0, 1, 0.55, 0.55, 1, 0, 0xfedcba98, 0x2b978c46, 0,
-    0x80000002, 654321, 18, 35, 0, 0.7071067, 0.7071067, 0.8, 0.8, 1, 1, 789, 0x2b978c46, 0
+    0x80000001, 123456, 12, 34, 0, 0, 1, 0.55, 0.55, 1, 0, 0xfedcba98, 0x2b978c46, 0, 6, 0, 0, 0,
+    0x80000002, 654321, 18, 35, 0, 0.7071067, 0.7071067, 0.8, 0.8, 1, 1, 789, 0x2b978c46, 0, 4, 0, 0, 0
   ];
-  const relayedNpcs = await host.request({ type: 'npcSnapshot', sequence: 0, npcs: npcFrame },
+  const relayedNpcs = await host.request({ type: 'npcSnapshot', actionAck: 0, sequence: 0, npcs: npcFrame },
     m => m.type === 'npcSnapshot' && m.role === 'host');
   const guestNpcs = await guest.wait(m => m.type === 'npcSnapshot' && m.role === 'host');
-  check(relayedNpcs.npcs.length === 28 && guestNpcs.npcs[15] === 654321 &&
+  check(relayedNpcs.npcs.length === 36 && guestNpcs.npcs[19] === 654321 &&
     guestNpcs.npcs[11] === 0xfedcba98,
     'World-owner NPC creatures are relayed as one bounded authoritative frame');
-  await failure(guest, { type: 'npcSnapshot', sequence: 0, npcs: npcFrame },
+  await failure(guest, { type: 'npcSnapshot', actionAck: 0, sequence: 0, npcs: npcFrame },
     'World owner authority');
-  await failure(host, { type: 'npcSnapshot', sequence: 1, npcs: [1, 2, 3] },
+  await failure(host, { type: 'npcSnapshot', actionAck: 0, sequence: 1, npcs: [1, 2, 3] },
     'Invalid npcs');
-  await failure(host, { type: 'npcSnapshot', sequence: 0, npcs: npcFrame }, 'Stale NPC');
-  await failure(host, { type: 'npcSnapshot', sequence: 1, npcs: [...npcFrame.slice(0, 14), ...npcFrame.slice(0, 14)] }, 'Invalid npcs');
-  const emptyNpcs = await host.request({ type: 'npcSnapshot', sequence: 1, npcs: [] }, m => m.type === 'npcSnapshot' && m.sequence === 1);
+  await failure(host, { type: 'npcSnapshot', actionAck: 0, sequence: 0, npcs: npcFrame }, 'Stale NPC');
+  await failure(host, { type: 'npcSnapshot', actionAck: 0, sequence: 1, npcs: [...npcFrame.slice(0, 18), ...npcFrame.slice(0, 18)] }, 'Invalid npcs');
+  const action = await guest.request({type:'worldAction',worldGeneration:state.worldGeneration,sequence:1,
+    id:0x80000001,resource:123456,damage:2,removed:false,effects:false},m=>m.type==='worldAction');
+  check(action.damage===2 && action.id===0x80000001,'Guest combat reaches the owner using the shared object ID');
+  await host.wait(m=>m.type==='worldAction' && m.sequence===1);
+  await failure(guest,{type:'worldAction',worldGeneration:state.worldGeneration,sequence:1,
+    id:0x80000001,resource:123456,damage:2,removed:false,effects:false},'Stale world action');
+  await failure(guest,{type:'worldAction',worldGeneration:state.worldGeneration-1,sequence:2,
+    id:0x80000001,resource:123456,damage:0,removed:true,effects:false},'Stale world generation');
+  const pickup=await guest.request({type:'worldAction',worldGeneration:state.worldGeneration,sequence:2,
+    id:0x80000001,resource:123456,damage:0,removed:true,effects:true},m=>m.type==='worldAction'&&m.sequence===2);
+  check(pickup.removed,'Guest removal requests shared loot generation on the owner');
+  const duplicateRemoval=await guest.request({type:'worldAction',worldGeneration:state.worldGeneration,sequence:3,
+    id:0x80000001,resource:123456,damage:0,removed:true,effects:true},m=>m.type==='worldAction'&&m.sequence===3);
+  check(!duplicateRemoval.removed && !duplicateRemoval.effects,'An already removed shared object cannot generate owner loot twice');
+  const food=[0x80000003,100,1,2,0,0,1,0.5,0.5,1,0,0,0,0,1,0,0,0];
+  const full=Array.from({length:4094},(_,i)=>[i+10,...food.slice(1)]).flat();
+  const fullFrame=await host.request({type:'npcSnapshot',sequence:1,actionAck:3,npcs:full},m=>m.type==='npcSnapshot'&&m.sequence===1);
+  check(fullFrame.npcs.length===4094*18 && fullFrame.actionAck===3,'All loaded food/scenery objects fit in a full pool snapshot');
+  await failure(host,{type:'npcSnapshot',sequence:2,actionAck:3,npcs:[...full,...food]},'Invalid npcs');
+  const emptyNpcs = await host.request({ type: 'npcSnapshot', actionAck: 0, sequence: 2, npcs: [] }, m => m.type === 'npcSnapshot' && m.sequence === 2);
   check(emptyNpcs.npcs.length === 0, 'An empty authoritative population removes departed NPCs');
   state = await host.request({ type: 'hostPause', paused: true }, stateMessage(state.revision + 1));
   const pausedGuest = await guest.wait(stateMessage(state.revision));
@@ -269,11 +288,16 @@ try {
     'Opening an editor mirrors its shared editor state');
   const liveSpecies = Buffer.from('live-editor-model-v1').toString('base64');
   const liveOnGuest = await host.request({
-    type: 'speciesLive', sequence: 0, species: liveSpecies
+    type: 'speciesLive', sequence: 0, baseSequence: state.speciesSequence, species: liveSpecies
   }, m => m.type === 'speciesLive' && m.role === 'host');
   const liveOnHost = await guest.wait(m => m.type === 'speciesLive' && m.role === 'host');
   check(liveOnGuest.species === liveSpecies && liveOnHost.species === liveSpecies,
     'Live creature edits are broadcast byte-for-byte');
+  const staleEditor=await guest.request({type:'speciesLive',sequence:0,baseSequence:0,species:Buffer.from('stale').toString('base64')},m=>m.type==='speciesConflict');
+  check(staleEditor.species===liveSpecies && staleEditor.clientSequence===0,'Stale editor updates return the current model instead of overwriting the peer');
+  const nextEdit=Buffer.from('guest-added-mouth').toString('base64');
+  const edited=await guest.request({type:'speciesLive',sequence:1,baseSequence:staleEditor.sequence,species:nextEdit},m=>m.type==='speciesLive'&&m.role==='guest');
+  check(edited.species===nextEdit && edited.clientSequence===1,'Edits from player two are acknowledged and broadcast to player one');
   const finalLiveSpecies = Buffer.from('live-editor-model-v2').toString('base64');
   state = await guest.request({ type: 'editorClose', species: finalLiveSpecies }, stateMessage(state.revision + 1));
   const editorClosedHost = await host.wait(stateMessage(state.revision));
@@ -284,7 +308,7 @@ try {
   await guest.wait(stateMessage(state.revision));
   state = await guest.request({ type: 'editorClose', species: '' }, stateMessage(state.revision + 1));
   await host.wait(stateMessage(state.revision));
-  check(!state.evolving && state.species === finalLiveSpecies,
+  check(!state.evolving && state.species === '',
     'An empty final editor snapshot unlocks the world without erasing the last valid creature');
 
   await guest.request({ type: 'requestEvolution' }, m => m.type === 'evolutionRequestAccepted');
@@ -343,8 +367,10 @@ try {
   host.socket.write(ping.subarray(5));
   await pong;
   check(true, 'Fragmented TCP frame');
+  const hostLeftReason = reconnect.wait(m => m.type === 'sessionEnded');
   host.socket.destroy();
   await host.closed;
+  check((await hostLeftReason).reason === 'host_left', 'Host exit delivers its reason before closing the guest socket');
   await reconnect.closed;
   check(true, 'Host exit disconnects guest');
   await stop();
