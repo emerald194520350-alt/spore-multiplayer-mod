@@ -3,6 +3,9 @@
 #include "../native/EditorSync.h"
 #include "../native/ProgressSync.h"
 #include "../native/NpcMotion.h"
+#include "../native/EditorBudget.h"
+#include "../native/CellAnimationSync.h"
+#include <memory>
 #include <stdexcept>
 
 inline bool TestSharedWorld()
@@ -35,6 +38,43 @@ inline bool TestSharedWorld()
     auto confirmed=b.Reconcile(server,be.sequence);
     require(confirmed.missions[1]==6&&!b.Capture(confirmed,be),"Quest acknowledgements never echo");
     using namespace CoopEditor;
+    struct Part { int mModelPrice; std::shared_ptr<Part> mpSymmetricRigblock; };
+    auto spike = std::make_shared<Part>(); spike->mModelPrice=10;
+    auto mirror = std::make_shared<Part>(); mirror->mModelPrice=10;
+    spike->mpSymmetricRigblock=mirror;
+    mirror->mpSymmetricRigblock=spike;
+    int price=0, budget=0;
+    require(ModelPrice(std::vector<std::shared_ptr<Part>>{spike,mirror},price) && price==10,
+        "A mirrored spike pair is a single ten-DNA purchase");
+    require(ModelPrice(std::vector<std::shared_ptr<Part>>{mirror,spike},price) && price==10,
+        "Part order cannot change a symmetric pair's price");
+    struct BlockPrice { unsigned instanceID, groupID; int symmetricIndex; bool isAsymmetric; };
+    std::vector<BlockPrice> pair{{1,2,1,false},{1,2,0,false},{3,2,-1,false}};
+    auto properties=[](const BlockPrice& block,int& value){value=block.instanceID==1?10:0; return true;};
+    require(ResourcePrice(pair,properties,price) && price==10,
+        "Incoming unloaded pair uses native property prices and the free body stays free");
+    pair[1].symmetricIndex=99;
+    require(!ResourcePrice(pair,properties,price),"Broken symmetry cannot hide part costs");
+    require(ReplacementBudget(16,30,40,budget) && budget==6,
+        "Remote spike placement spends ten DNA: 16 becomes 6");
+    require(ReplacementBudget(budget,40,40,budget) && budget==6,
+        "Repeated snapshots and paint-only changes never double charge");
+    require(ReplacementBudget(budget,40,30,budget) && budget==16,
+        "Deletion or undo refunds the price difference");
+    require(ReplacementBudget(26,40,50,budget) && budget==16,
+        "Merged remote edits only charge the difference from the already-paid local model");
+    require(!ReplacementBudget(6,30,40,budget) && !ReplacementBudget(INT_MAX,10,0,budget),
+        "Unfunded concurrent edits and overflowing balances cannot create free parts");
+    spike->mpSymmetricRigblock.reset(); mirror->mpSymmetricRigblock.reset();
+    require(ModelPrice(std::vector<std::shared_ptr<Part>>{spike,mirror},price) && price==20,
+        "Independent asymmetric parts are separate purchases");
+    std::uint32_t animation=0;
+    require(CoopVisual::MouthTransition(79,0,animation) && animation==79 &&
+        !CoopVisual::MouthTransition(79,79,animation), "Chewing starts once, without restarting each graphics frame");
+    require(CoopVisual::MouthTransition(4,79,animation) && animation==0,
+        "Mouth returns to idle when the player finishes eating");
+    require(!CoopVisual::MouthTransition(UINT32_MAX,0,animation) &&
+        !CoopVisual::MouthTransition(9,0,animation), "Invalid and death animations are not replayed");
     require(HistorySlot(1,1)==0 && HistorySlot(2,2)==1,
         "Native editor history cursor is one-based after initial load and part placement");
     require(HistorySlot(2,3)==1 && HistorySlot(3,3)==2,
@@ -84,5 +124,19 @@ inline bool TestSharedWorld()
     motion.Push(3,3000,{{510,0,0},0,0},1);
     require(motion.Sample(3000).position.x==510 && motion.Sample(3000).qw==1,
         "Long gaps reset interpolation and zero rotations remain finite");
+    CoopWorld::NpcMotion playerMotion;
+    for (int packet=0; packet<20; ++packet)
+        playerMotion.Push(packet,1000+packet*50,{{double(packet),0,0},0,1,1,0},1);
+    double previousX=-1;
+    for (int frame=0; frame<10; ++frame)
+    {
+        auto p=playerMotion.Sample(1880+frame*5,75);
+        require(std::abs(p.position.x-(1880+frame*5-75-1000)/50.0)<1e-6 && p.position.x>previousX,
+            "Player poses advance every rendered frame between 20Hz network samples");
+        require(std::abs(p.qx-0.70710678f)<1e-6 && std::abs(p.qw-0.70710678f)<1e-6,
+            "Player smoothing preserves all four quaternion components");
+        previousX=p.position.x;
+    }
+    require(playerMotion.Sample(6000,75).position.x==19,"A disconnected player cannot extrapolate away");
     return true;
 }

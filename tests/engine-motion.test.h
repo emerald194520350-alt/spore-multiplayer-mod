@@ -2,6 +2,7 @@
 #include "../native/CellMotionAbi.h"
 #include "../native/CellGrowthAbi.h"
 #include "../native/CellProgressAbi.h"
+#include "../native/CellAnimationAbi.h"
 #include <array>
 #include <cmath>
 #include "engine-replica.test.h"
@@ -71,7 +72,9 @@ inline int TestEngineMotion(const char* executable)
         CoopEngine::kEnterCellEditorSize,CoopEngine::kEnterCellEditorHash,CoopEngine::kEnterCellEditorRelocations),"Cell campaign editor ABI mismatch");
     require(CoopEngine::MatchesMotionCode(code(CoopEngine::kPartCinematicRva),CoopEngine::kPartCinematicSize,base,
         CoopEngine::kPartCinematicSize,CoopEngine::kPartCinematicHash,CoopEngine::kPartCinematicRelocations),"First-part cinematic ABI mismatch");
-    int checks=10;
+    require(CoopEngine::MatchesMotionCode(code(CoopEngine::kPlayCellAnimationRva),CoopEngine::kPlayCellAnimationSize,base,
+        CoopEngine::kPlayCellAnimationSize,CoopEngine::kPlayCellAnimationHash,CoopEngine::kPlayCellAnimationRelocations),"Mouth animation transition ABI mismatch");
+    int checks=11;
     // Reproduce the old bug: changing the transform leaves the physics center
     // behind; the next simulation frame restores that old center.
     const Vec target{25,-40,0}; write(cell,0x4c,target);

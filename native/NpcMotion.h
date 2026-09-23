@@ -10,6 +10,7 @@ namespace CoopWorld
     {
         Point position;
         float qz = 0, qw = 1;
+        float qx = 0, qy = 0;
     };
 
     // Store fixed network coordinates, so growth can rebase the local camera
@@ -24,9 +25,9 @@ namespace CoopWorld
         void Push(std::uint64_t seq, std::uint64_t tick, NpcPose pose, float scale)
         {
             if (!frames.empty() && seq <= sequence) return;
-            const float length = std::hypot(pose.qz, pose.qw);
-            if (length > 0.0001f) { pose.qz /= length; pose.qw /= length; }
-            else { pose.qz = 0; pose.qw = 1; }
+            const float length = std::sqrt(pose.qx*pose.qx+pose.qy*pose.qy+pose.qz*pose.qz+pose.qw*pose.qw);
+            if (length > 0.0001f) { pose.qx /= length; pose.qy /= length; pose.qz /= length; pose.qw /= length; }
+            else { pose.qx = pose.qy = pose.qz = 0; pose.qw = 1; }
             if (!frames.empty())
             {
                 const auto& last = frames.back();
@@ -42,10 +43,10 @@ namespace CoopWorld
             while (frames.size() > 8) frames.pop_front();
         }
 
-        NpcPose Sample(std::uint64_t now) const
+        NpcPose Sample(std::uint64_t now, std::uint64_t delay = 125) const
         {
             if (frames.empty()) return {};
-            const auto tick = now > 125 ? now-125 : 0;
+            const auto tick = now > delay ? now-delay : 0;
             if (tick <= frames.front().tick) return frames.front().pose;
             for (size_t i=1; i<frames.size(); ++i)
             {
@@ -54,11 +55,14 @@ namespace CoopWorld
                 const float t = float(tick-a.tick)/float(b.tick-a.tick);
                 const auto& p = a.pose.position; const auto& q = b.pose.position;
                 NpcPose result{{p.x+(q.x-p.x)*t, p.y+(q.y-p.y)*t, p.z+(q.z-p.z)*t}};
-                const float sign = a.pose.qz*b.pose.qz+a.pose.qw*b.pose.qw < 0 ? -1.0f : 1.0f;
+                const float sign = a.pose.qx*b.pose.qx+a.pose.qy*b.pose.qy+
+                    a.pose.qz*b.pose.qz+a.pose.qw*b.pose.qw < 0 ? -1.0f : 1.0f;
+                result.qx = a.pose.qx+(b.pose.qx*sign-a.pose.qx)*t;
+                result.qy = a.pose.qy+(b.pose.qy*sign-a.pose.qy)*t;
                 result.qz = a.pose.qz+(b.pose.qz*sign-a.pose.qz)*t;
                 result.qw = a.pose.qw+(b.pose.qw*sign-a.pose.qw)*t;
-                const float length = std::hypot(result.qz, result.qw);
-                result.qz /= length; result.qw /= length;
+                const float length = std::sqrt(result.qx*result.qx+result.qy*result.qy+result.qz*result.qz+result.qw*result.qw);
+                result.qx /= length; result.qy /= length; result.qz /= length; result.qw /= length;
                 return result;
             }
             return frames.back().pose;

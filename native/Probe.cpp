@@ -26,9 +26,12 @@
 #include "CellReplicaAbi.h"
 #include "CellGrowthAbi.h"
 #include "CellProgressAbi.h"
+#include "CellAnimationAbi.h"
+#include "CellAnimationSync.h"
 #include "WorldCoordinates.h"
 #include "NpcMotion.h"
 #include "EditorSync.h"
+#include "EditorBudget.h"
 #include "SaveCompatibility.h"
 #include "CoopUi.h"
 #include <Spore/Simulator/Cell/cCellGFX.h>
@@ -111,6 +114,7 @@ namespace
     Simulator::cObjectPoolIndex gRemoteCellIndex = -1;
     uint32_t gRemoteCellModel = 0;
     uint32_t gRemoteCellResource = 0;
+    CoopWorld::NpcMotion gRemoteMotion;
     Simulator::cObjectPoolIndex gHostAppearanceProxyIndex = -1;
     uint32_t gHostAppearanceProxyModel = 0;
     bool gLocalPlayerHiddenByProxy = false;
@@ -424,6 +428,23 @@ namespace
         return functions;
     }
 
+    void SyncMouthAnimation(Simulator::Cell::cCellObjectData* cell, std::uint32_t incoming)
+    {
+        using Play = float(__cdecl*)(Simulator::Cell::cCellObjectData*,
+            Simulator::Cell::cCellObjectData*, int, int);
+        static const auto play = reinterpret_cast<Play>(VerifiedMotionCode(CoopEngine::kPlayCellAnimationRva,
+            CoopEngine::kPlayCellAnimationSize, CoopEngine::kPlayCellAnimationHash,
+            CoopEngine::kPlayCellAnimationRelocations));
+        if (!play || !cell || !cell->mModelKey.instanceID ||
+            !CoopVisual::HasCellIndex(cell->mGFXObjectIndex)) return;
+        std::uint32_t target = 0;
+        if (!CoopVisual::MouthTransition(incoming, cell->mCurrentAnimation, target)) return;
+        // E6D200 starts the structure animation, unlike assigning mCurrentAnimation.
+        // No food target is passed: damage/pickups stay with the real player.
+        play(cell, nullptr, static_cast<int>(target), cell->mCurrentAnimation);
+        cell->field_18C = static_cast<Simulator::Cell::CellAnimations>(target);
+    }
+
     bool MoveCellBody(Simulator::Cell::cCellObjectData* cell, const Math::Vector3& position,
         const Math::Quaternion& orientation)
     {
@@ -661,6 +682,7 @@ namespace
         gRemoteCellIndex = -1;
         gRemoteCellModel = 0;
         gRemoteCellResource = 0;
+        gRemoteMotion = CoopWorld::NpcMotion{};
         gRemoteRenderWaitSince = 0;
         gRemoteRenderDelayed = false;
         gRemoteCreateRetryAfter = GetTickCount64() + 750;
@@ -893,6 +915,17 @@ namespace
                     baker->BakeModel(gRemoteCreationKey, Editors::BakeParameters(0));
     }
 
+    CoopWorld::NpcPose SampleRemotePose(const CoopNet::Snapshot& snapshot, ULONG64 now)
+    {
+        const auto& p = snapshot.remotePose;
+        gRemoteMotion.Push(snapshot.remotePositionSequence, snapshot.remotePositionReceivedTick,
+            {gWorldCoordinates.Encode({snapshot.remoteX,snapshot.remoteY,snapshot.remoteZ}),
+                p.qz,p.qw,p.qx,p.qy}, snapshot.remoteScale*float(gWorldCoordinates.unit));
+        auto pose = gRemoteMotion.Sample(now, 75);
+        pose.position = gWorldCoordinates.Decode(pose.position);
+        return pose;
+    }
+
     void UpdateRemoteCell(const CoopNet::Snapshot& snapshot)
     {
         auto game = Simulator::Cell::cCellGame::Get();
@@ -960,7 +993,9 @@ namespace
         }
         remote->mIsIdle = true;
         remote->mIsInvulnerable = true;
-        MoveCellBody(remote, renderedPosition, Math::Quaternion(pose.qx, pose.qy, pose.qz, pose.qw));
+        const auto smooth = SampleRemotePose(snapshot, now);
+        MoveCellBody(remote, Math::Vector3(float(smooth.position.x),float(smooth.position.y),float(smooth.position.z)),
+            Math::Quaternion(smooth.qx, smooth.qy, smooth.qz, smooth.qw));
         remote->mTransform.SetScale(snapshot.remoteScale);
         remote->mTargetSize = snapshot.remoteTargetSize;
         remote->mOpacity = pose.visible ? 1.0f : 0.0f;
@@ -1390,13 +1425,15 @@ namespace
             {
                 before = remote->GetPosition();
                 const auto& p = snapshot.remotePose;
-                MoveCellBody(remote, Math::Vector3(snapshot.remoteX, snapshot.remoteY, snapshot.remoteZ),
-                    Math::Quaternion(p.qx, p.qy, p.qz, p.qw));
+                const auto smooth = SampleRemotePose(snapshot, now);
+                MoveCellBody(remote, Math::Vector3(float(smooth.position.x),float(smooth.position.y),float(smooth.position.z)),
+                    Math::Quaternion(smooth.qx, smooth.qy, smooth.qz, smooth.qw));
                 const auto size = CoopVisual::SharedSize(CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()),
                     player->mTransform.GetScale(), player->mTargetSize, snapshot);
                 remote->mTransform.SetScale(size.scale);
                 remote->mTargetSize = size.target;
                 remote->mOpacity = remote->mTargetOpacity = p.visible ? 1.0f : 0.0f;
+                SyncMouthAnimation(remote, p.animation);
             }
             if (proxy && proxy != player && gLocalPlayerHiddenByProxy &&
                 player->Index() == gHiddenPlayerIndex)
@@ -1405,6 +1442,7 @@ namespace
                 proxy->mTransform.SetScale(player->mTransform.GetScale());
                 player->mOpacity = player->mTargetOpacity = 0.0f;
                 proxy->mOpacity = proxy->mTargetOpacity = 1.0f;
+                SyncMouthAnimation(proxy, static_cast<std::uint32_t>(player->mCurrentAnimation));
             }
             if (!CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) &&
                 !IsPartCinematic(game) &&
@@ -1609,6 +1647,20 @@ namespace
         return SerializeEditorResource(resource.get());
     }
 
+    bool EditorResourcePrice(Editors::cEditorResource* resource, int& price)
+    {
+        return resource && CoopEditor::ResourcePrice(resource->mBlocks,
+            [](const Editors::cEditorResourceBlock& block, int& value) {
+                PropertyListPtr properties;
+                if (!PropManager.GetPropertyList(block.instanceID,block.groupID,properties)) return false;
+                value = 0;
+                // 4433AE reads 0x02166464 into EditorRigblock::mModelPrice.
+                // Missing price defaults to zero, e.g. the Cell body spine.
+                App::Property::GetInt32(properties.get(),0x02166464,value);
+                return true;
+            }, price);
+    }
+
     bool ApplyEditorModel(const std::string& blob)
     {
         auto editor = Editors::GetEditor();
@@ -1627,12 +1679,39 @@ namespace
         model->mKey = previous->mKey;
         model->Load(resource.get());
         if (model->mRigblocks.empty()) { delete model; return false; }
+        auto limits = editor->mpEditorLimits.get();
+        int oldPrice = 0, newPrice = 0, budget = limits ? limits->GetValue(Editors::StdEditorLimits::kBudget) : 0;
+        // Load has not parsed the new rigblocks' prices yet. Price the resource
+        // directly; otherwise zero-initialized fields refund the entire body.
+        bool priced = EditorResourcePrice(resource.get(), newPrice);
+        if (gEditorInitialModelPending)
+        {
+            // Native entry already paid for the species used to enter. Its
+            // temporary green fallback is not a purchase. Still charge edits
+            // that arrived while this window was entering the editor.
+            oldPrice = newPrice;
+            if (gEditorEntryResource) priced = priced && EditorResourcePrice(gEditorEntryResource.get(),oldPrice);
+        }
+        else priced = priced && CoopEditor::ModelPrice(previous->mRigblocks, oldPrice);
+        if (!limits || !priced || !CoopEditor::ReplacementBudget(budget, oldPrice, newPrice, budget))
+        {
+            delete model;
+            WriteProbeLog("EditorSync: cannot afford or price merged model; retaining local edit.");
+            return false;
+        }
         // SCP1 carries body and paint; names are local editor metadata. Load
         // clears them, so preserve them before the old model is disposed.
         model->mName = previous->mName;
         model->mDescription = previous->mDescription;
         model->mAcceptedName = previous->mAcceptedName;
         editor->SetEditorModel(model);
+        if (limits)
+        {
+            limits->SetValue(Editors::StdEditorLimits::kBudget, budget);
+            char line[160]{};
+            sprintf_s(line, "EditorSync: shared budget=%d price=%d->%d", budget, oldPrice, newPrice);
+            WriteProbeLog(line);
+        }
         model->mSkinNeedsUpdating = true;
         gEditorHistoryPending = true;
         gObservedEditorModel = model;
