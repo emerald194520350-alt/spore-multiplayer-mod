@@ -21,6 +21,29 @@ namespace CoopUi
         }
     }
 
+    class PeerArrowDrawable : public UTFWin::ButtonDrawableStandard
+    {
+    public:
+        float dx=1, dy=0;
+        void Paint(UTFWin::UIRenderer* renderer, const Math::Rectangle& area,
+            const UTFWin::RenderParams&) override
+        {
+            if (!renderer) return;
+            auto& graphics=renderer->GetGraphics2D();
+            const Math::Color previous(ReadGraphicsColor(graphics));
+            const float x=(area.x1+area.x2)*.5f, y=(area.y1+area.y2)*.5f;
+            RoundedFill(graphics,{x-21,y-21,x+21,y+21},14,0xC017354A);
+            const Math::Color border(0xFFEAFFFF), fill(0xFF4DDCEA);
+            graphics.FillTriangleGradient({x+dx*17,y+dy*17},border,
+                {x-dx*12-dy*12,y-dy*12+dx*12},border,
+                {x-dx*12+dy*12,y-dy*12-dx*12},border);
+            graphics.FillTriangleGradient({x+dx*13,y+dy*13},fill,
+                {x-dx*9-dy*8,y-dy*9+dx*8},fill,
+                {x-dx*9+dy*8,y-dy*9-dx*8},fill);
+            graphics.SetColor(previous);
+        }
+    };
+
     class Drawable : public UTFWin::ButtonDrawableStandard
     {
         Style mStyle;

@@ -22,13 +22,19 @@ function body(source, signature, nextSignature) {
 }
 
 const updateRemote = body(probe, 'void UpdateRemoteCell(', 'void RemoveHostAppearanceProxy(');
+assert.match(updateRemote,/if \(!CoopVisual::AppearanceMatchesPosition\(snapshot\)\)[\s\S]*RemoveRemoteCell[\s\S]*return;[\s\S]*CreatePlayerCellClone/,
+  'New positions after evolution must not render the old cached creature');
 const updateStability = body(probe, 'bool UpdateLocalCellStability(', 'void SubmitLocalAppearance(');
 const submitAppearance = body(probe, 'void SubmitLocalAppearance(', 'void ApplyRemoteAppearance(');
 const applyRemoteAppearance = body(probe, 'void ApplyRemoteAppearance(', 'void UpdateRemoteCell(');
 const coopUpdate = body(probe, 'void CoopUpdate()', 'void Spawn()');
-const inviteUI = body(probe, 'void UpdateInviteUI(', 'void CoopUpdate()');
+const inviteUI = body(probe, 'void UpdateInviteUI(', 'void UpdatePeerIndicator(');
 const validateSavedWorld = body(probe, 'bool ValidateIncomingSavedWorld(', 'bool FindNewestSavedGame(');
 const sharedEditor = body(probe, 'void UpdateSharedEditor(', 'constexpr uint32_t kInviteButtonID');
+assert.match(sharedEditor,/click\.ButtonClick\.commandID=button->GetCommandID\(\)[\s\S]*ui->HandleUIMessage\(button,click\)/,
+  'Remote acceptance must reach EditorUI with the native command, not only the child window');
+assert.doesNotMatch(sharedEditor,/button->SendMsg\(click\)/,
+  'A child SendMsg returned without closing the native editor in Beta 5');
 const serializeEditor = body(probe, 'std::string SerializeEditorModel()', 'bool ApplyEditorModel(');
 assert.match(serializeEditor,/HistorySlot[\s\S]*SerializeEditorResource\(editor->mEditHistory\[index\]\.get\(\)\)/,
   'Publishing must read the completed native edit transaction, including undo/redo');

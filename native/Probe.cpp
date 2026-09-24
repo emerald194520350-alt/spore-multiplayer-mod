@@ -34,6 +34,7 @@
 #include "EditorBudget.h"
 #include "SaveCompatibility.h"
 #include "CoopUi.h"
+#include "PeerIndicator.h"
 #include <Spore/Simulator/Cell/cCellGFX.h>
 #include <Spore/Editors/BakeManager.h>
 #include <Spore/Editors/EditorUI.h>
@@ -165,6 +166,8 @@ namespace
     IWindowPtr gInvitePromptTitle;
     IWindowPtr gInvitePromptDetail;
     IWindowPtr gSessionStatus;
+    IWindowPtr gPeerArrow;
+    CoopUi::PeerArrowDrawable* gPeerArrowDrawable=nullptr; // Owned by the window.
     IWindowPtr gSessionEndedPanel;
     IWindowPtr gSessionEndedTitle;
     IWindowPtr gSessionEndedOk;
@@ -189,6 +192,7 @@ namespace
     std::uint64_t gSharedEditorSession = 0;
     std::uint64_t gClosedEditorSession = 0;
     bool gEditorAcceptRequested = false, gRemoteEditorFinish = false;
+    ULONG64 gRemoteFinishRetryAfter=0;
     uint64_t gAppliedSpeciesSequence = 0;
     uint64_t gPendingSpeciesSequence = 0;
     std::string gPendingSpecies;
@@ -885,7 +889,17 @@ namespace
             snapshot.remoteAppearanceModelType, snapshot.remoteAppearanceModelGroup);
         // Reuse an existing baked creation only after comparing the full resource.
         // Equal numeric IDs alone are not enough across isolated profiles.
-        if (SerializeCreation(sourceKey) == snapshot.remoteAppearanceBlob)
+        auto player=GetLocalPlayerCell();
+        // After shared evolution both profiles saved the same creation under
+        // different keys. Reuse the avatar's already rendered skin before
+        // requesting another bake under a foreign or generated key.
+        if (player && player->mModelKey.instanceID &&
+            SerializeCreation(player->mModelKey)==snapshot.remoteAppearanceBlob)
+        {
+            gRemoteCreationKey=player->mModelKey;
+            WriteProbeLog("Peer appearance matches the live avatar; reusing its complete local skin.");
+        }
+        else if (SerializeCreation(sourceKey) == snapshot.remoteAppearanceBlob)
         {
             gRemoteCreationKey = sourceKey;
             WriteProbeLog("Peer appearance matches a local creation exactly.");
@@ -931,6 +945,11 @@ namespace
             return;
         }
         const bool owner = CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole());
+        if (!CoopVisual::AppearanceMatchesPosition(snapshot))
+        {
+            RemoveRemoteCell("waiting for the peer's final evolved appearance");
+            return;
+        }
         const auto sharedSize = CoopVisual::SharedSize(owner, player->mTransform.GetScale(), player->mTargetSize, snapshot);
         // The avatar grows through native food progression. Writing only its
         // transform scale corrupts the relation to its collision/body nodes.
@@ -1106,7 +1125,7 @@ namespace
         if (CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) ||
             !snapshot.inviteAccepted || !snapshot.hasRemotePosition ||
             GetTickCount64() - snapshot.remotePositionReceivedTick > 2000 ||
-            !player || !gRemoteCreationKey.instanceID)
+            !player || !gRemoteCreationKey.instanceID || !CoopVisual::AppearanceMatchesPosition(snapshot))
         {
             if (CoopVisual::HasCellIndex(gHostAppearanceProxyIndex))
                 RemoveHostAppearanceProxy("Host appearance proxy removed.");
@@ -2011,15 +2030,21 @@ namespace
             auto ui=editor->mpEditorUI;
             auto button=ui ? FindEditorAccept(ui->mMainUI.GetContainerWindow()) : nullptr;
             if (!button && ui) button=FindEditorAccept(ui->mSharedUI.GetContainerWindow());
-            if (button && gEditorUIHookAttached)
+            if (button && gEditorUIHookAttached && now>=gRemoteFinishRetryAfter)
             {
                 ApplyEditorName(snapshot.speciesName);
                 if (editor->mpEditorNamePanel) editor->mpEditorNamePanel->SetExtended(false);
                 IWindowPtr retained=button;
-                gRemoteEditorFinish=true; // Suppress the echo when native saving completes.
                 UTFWin::Message click{}; click.eventType=UTFWin::kMsgButtonClick; click.source=button;
-                button->SendMsg(click);
-                WriteProbeLog("EditorSync: remote final revision loaded; native Accept dispatched once.");
+                click.ButtonClick.commandID=button->GetCommandID();
+                // SendMsg on the child button is not the native parent command
+                // route. Invoke EditorUI's command handler and check its receipt.
+                gRemoteEditorFinish=true; // Set before a potentially synchronous exit.
+                const bool handled=ui->HandleUIMessage(button,click);
+                if (!handled) gRemoteEditorFinish=false;
+                gRemoteFinishRetryAfter=now+1000;
+                WriteProbeLog(handled ? "EditorSync: native EditorUI accepted remote finish command."
+                    : "EditorSync: native EditorUI is busy; remote finish will retry.");
                 return;
             }
         }
@@ -2869,10 +2894,50 @@ namespace
         }
     }
 
+    void UpdatePeerIndicator(const CoopNet::Snapshot& snapshot)
+    {
+        if (gPeerArrow) gPeerArrow->SetFlag(UTFWin::kWinFlagVisible,false);
+        if (!snapshot.connected || !snapshot.inviteAccepted || !snapshot.hasRemotePosition ||
+            snapshot.editorOpen || !Simulator::IsCellGame() || Simulator::IsEditorMode() ||
+            Simulator::IsLoadingGameMode() || GetTickCount64()-snapshot.remotePositionReceivedTick>2000)
+            return;
+        auto time=Simulator::cGameTimeManager::Get();
+        if ((time && time->IsPaused()) || IsPartCinematic(Simulator::Cell::cCellGame::Get())) return;
+        auto root=WindowManager.GetMainWindow();
+        auto viewer=App::GetViewer();
+        if (!root || !viewer || !viewer->GetCamera()) return;
+        float matrix[16];
+        static_assert(sizeof(viewer->field_100)==sizeof(matrix),"Viewer inverse projection ABI");
+        memcpy(matrix,&viewer->field_100,sizeof(matrix));
+        float x=0,y=0;
+        if (!CoopUi::ProjectPeer(matrix,snapshot.remoteX,snapshot.remoteY,snapshot.remoteZ,x,y)) return;
+        const auto area=root->GetArea();
+        const float width=area.GetWidth(), height=area.GetHeight();
+        const auto arrow=CoopUi::PeerArrow((x+1)*.5f*width,(1-y)*.5f*height,width,height);
+        if (!arrow.visible) return;
+        if (!gPeerArrow)
+        {
+            auto window=new UTFWin::Window();
+            window->SetControlID(0x5C0F1014);
+            gPeerArrowDrawable=new CoopUi::PeerArrowDrawable();
+            window->SetDrawable(gPeerArrowDrawable);
+            window->SetFlag(UTFWin::kWinFlagIgnoreMouse,true);
+            window->SetFlag(UTFWin::kWinFlagAlwaysInFront,true);
+            root->AddWindow(window);
+            gPeerArrow=window;
+        }
+        gPeerArrowDrawable->dx=arrow.dx; gPeerArrowDrawable->dy=arrow.dy;
+        gPeerArrow->SetArea({arrow.x-24,arrow.y-24,arrow.x+24,arrow.y+24});
+        gPeerArrow->SetFlag(UTFWin::kWinFlagVisible,true);
+        gPeerArrow->Invalidate();
+        root->BringToFront(gPeerArrow.get());
+    }
+
     void CoopUpdate()
     {
         const auto snapshot = LocalWorldSnapshot(CoopNet::GetSnapshot());
         UpdateSessionEndedUI(snapshot);
+        UpdatePeerIndicator(snapshot);
         if (!snapshot.enabled || !snapshot.connected)
         {
             SetButtonVisible(gInviteButton.get(), false);

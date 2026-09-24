@@ -76,6 +76,8 @@ int main(int argc, char** argv)
             return 0;
         }
         Check(TestSharedWorld(),"Shared world coordinates, editor rebase and mission increments");
+        TestPeerIndicator();
+        Check(true,"Off-screen indicator covers all edges, corners, aspect ratios and invalid inputs");
         NativeGraphicsFixture graphics;
         unsigned char removeCode[CoopEngine::kRemoveCellCodeSize]{};
         const unsigned char removePrologue[] = {0x8b,0x0d,0x04,0x3c,0x6b,0x01,0x83,0xec,0x10,0x55,0x8b,0x6c,0x24,0x18,0x83,0xc1,0x1c,0x55,0xe8,0x29,0xa2,0xcf,0xff};
