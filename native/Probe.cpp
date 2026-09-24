@@ -1771,7 +1771,8 @@ namespace
         gLastEditorName=wire;
     }
 
-    // Native EditorUI dispatch (5E007B -> 5DFD40) uses COMMAND 0x102 for
+    // Native EditorUI dispatch (5E00CE -> 5DFD40) uses component activation
+    // (0x287259F6), not the low-level button click (0x17), and COMMAND 0x102 for
     // validated save-and-exit and 0x103 for cancel. These are not control IDs.
     UTFWin::IWindow* FindEditorAccept(UTFWin::IWindow* window, int depth=0)
     {
@@ -1787,7 +1788,7 @@ namespace
     bool gEditorUIHookAttached=false;
     bool __fastcall EditorUIMessageHook(UTFWin::IWinProc* self, void*, UTFWin::IWindow* window, const UTFWin::Message& message)
     {
-        if (gWasEditorMode && message.eventType==UTFWin::kMsgButtonClick && message.source)
+        if (gWasEditorMode && message.eventType==UTFWin::kMsgComponentActivated && message.source)
         {
             const auto command=message.source->GetCommandID();
             if (command>=0x100 && command<=0x107)
@@ -2035,16 +2036,18 @@ namespace
                 ApplyEditorName(snapshot.speciesName);
                 if (editor->mpEditorNamePanel) editor->mpEditorNamePanel->SetExtended(false);
                 IWindowPtr retained=button;
-                UTFWin::Message click{}; click.eventType=UTFWin::kMsgButtonClick; click.source=button;
+                UTFWin::Message click{}; click.eventType=UTFWin::kMsgComponentActivated; click.source=button;
                 click.ButtonClick.commandID=button->GetCommandID();
-                // SendMsg on the child button is not the native parent command
-                // route. Invoke EditorUI's command handler and check its receipt.
+                // EditorUI only dispatches commands for component activation.
+                // A kMsgButtonClick sent directly here is always ignored.
                 gRemoteEditorFinish=true; // Set before a potentially synchronous exit.
                 const bool handled=ui->HandleUIMessage(button,click);
                 if (!handled) gRemoteEditorFinish=false;
                 gRemoteFinishRetryAfter=now+1000;
-                WriteProbeLog(handled ? "EditorSync: native EditorUI accepted remote finish command."
-                    : "EditorSync: native EditorUI is busy; remote finish will retry.");
+                char line[256]{};
+                sprintf_s(line,"EditorSync: remote finish activation handled=%d session=%llu command=0x102",
+                    handled,snapshot.editorSession);
+                WriteProbeLog(line);
                 return;
             }
         }

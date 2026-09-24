@@ -33,6 +33,11 @@ const validateSavedWorld = body(probe, 'bool ValidateIncomingSavedWorld(', 'bool
 const sharedEditor = body(probe, 'void UpdateSharedEditor(', 'constexpr uint32_t kInviteButtonID');
 assert.match(sharedEditor,/click\.ButtonClick\.commandID=button->GetCommandID\(\)[\s\S]*ui->HandleUIMessage\(button,click\)/,
   'Remote acceptance must reach EditorUI with the native command, not only the child window');
+assert.match(sharedEditor,/click\.eventType=UTFWin::kMsgComponentActivated/,
+  'Native EditorUI ignores low-level button clicks; it dispatches component activation');
+const editorHook=body(probe, 'bool __fastcall EditorUIMessageHook(', 'bool ApplyEditorModel(');
+assert.match(editorHook,/message\.eventType==UTFWin::kMsgComponentActivated/,
+  'Observe the same activation that the native editor handles for local save and cancel');
 assert.doesNotMatch(sharedEditor,/button->SendMsg\(click\)/,
   'A child SendMsg returned without closing the native editor in Beta 5');
 const serializeEditor = body(probe, 'std::string SerializeEditorModel()', 'bool ApplyEditorModel(');

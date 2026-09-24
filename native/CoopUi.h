@@ -33,7 +33,7 @@ namespace CoopUi
             const Math::Color previous(ReadGraphicsColor(graphics));
             const float x=(area.x1+area.x2)*.5f, y=(area.y1+area.y2)*.5f;
             RoundedFill(graphics,{x-21,y-21,x+21,y+21},14,0xC017354A);
-            const Math::Color border(0xFFEAFFFF), fill(0xFF4DDCEA);
+            const Math::Color border(0xFFFFF3B0), fill(0xFFFFD54F);
             graphics.FillTriangleGradient({x+dx*17,y+dy*17},border,
                 {x-dx*12-dy*12,y-dy*12+dx*12},border,
                 {x-dx*12+dy*12,y-dy*12-dx*12},border);
