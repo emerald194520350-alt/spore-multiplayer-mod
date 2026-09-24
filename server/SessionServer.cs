@@ -35,6 +35,9 @@ namespace SporeCoop
         public int Dna;
         public string Stage = "cell";
         public string Species = "";
+        public string SpeciesName = "";
+        public long EditorSession;
+        public bool EditorFinished;
         public bool Evolving;
         public string Editor;
         public string Fingerprint;
@@ -76,7 +79,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 5;
+        const int Protocol = 6;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -131,6 +134,7 @@ namespace SporeCoop
                 if (value < 0) throw new InvalidDataException("Invalid shared cell missions.");
             ValidateBlob(loaded.Species);
             loaded.Evolving = false;
+            loaded.EditorFinished = false;
             loaded.Editor = null;
             loaded.InvitePending = false;
             loaded.InviteAccepted = false;
@@ -162,7 +166,8 @@ namespace SporeCoop
                 hostPaused = State.HostPaused,
                 editor = State.Editor, editorId = State.EditorID,
                 speciesSequence = State.SpeciesSequence,
-                editorBudget = State.EditorBudget,
+                editorBudget = State.EditorBudget, speciesName = State.SpeciesName,
+                editorSession = State.EditorSession, editorFinished = State.EditorFinished,
                 progressInitialized = State.ProgressInitialized,
                 hostProgressSequence = State.HostProgressSequence,
                 guestProgressSequence = State.GuestProgressSequence,
@@ -255,6 +260,17 @@ namespace SporeCoop
             if (!data.TryGetValue(name, out value) || !(value is string) || ((string)value).Length > limit)
                 throw new ArgumentException("Invalid " + name);
             return (string)value;
+        }
+
+        static string SpeciesName(Dictionary<string, object> data)
+        {
+            string wire=data.ContainsKey("speciesName") ? Text(data,"speciesName",1368) : "";
+            ValidateBlob(wire);
+            byte[] bytes=Convert.FromBase64String(wire);
+            if (bytes.Length>1024 || bytes.Length%2!=0) throw new ArgumentException("Invalid speciesName UTF-16");
+            string name=new UnicodeEncoding(false,false,true).GetString(bytes);
+            if (name.IndexOf('\0')>=0) throw new ArgumentException("Invalid speciesName NUL");
+            return wire;
         }
 
         static long Integer(Dictionary<string, object> data, string name, long min, long max)
@@ -557,7 +573,7 @@ namespace SporeCoop
                 State.KillCount = 0;
                 State.PlayerHasMoved = State.PlayerHasEaten = false;
                 State.PartCinematicPlayed = State.ShowMateButton = State.FirstEditorEntry = false;
-                State.Species=""; State.SpeciesSequence=0;
+                State.Species=""; State.SpeciesName=""; State.EditorFinished=false; State.SpeciesSequence=0;
                 State.EditorBudget=0;
                 Changed();
                 return;
@@ -656,14 +672,16 @@ namespace SporeCoop
                 long editorId = Integer(data, "editorId", 0, uint.MaxValue);
                 string initial=data.ContainsKey("species") ? Text(data,"species",350000) : "";
                 int budget=(int)Integer(data,"editorBudget",0,100000000);
+                string name=SpeciesName(data);
                 ValidateBlob(initial);
                 if (!State.Evolving)
                 {
                     State.Evolving = true;
+                    ++State.EditorSession; State.EditorFinished=false;
                     State.Editor = peer.Role;
                     State.EditorID = editorId;
                     State.Species=initial; ++State.SpeciesSequence;
-                    State.EditorBudget=budget;
+                    State.EditorBudget=budget; State.SpeciesName=name;
                     Ready.Clear();
                     Pending = null;
                     Changed();
@@ -682,33 +700,41 @@ namespace SporeCoop
                 ValidateBlob(blob);
                 long baseSequence=Integer(data,"baseSequence",0,long.MaxValue);
                 int budget=(int)Integer(data,"editorBudget",0,100000000);
+                string name=SpeciesName(data);
                 peer.EditorSequence = sequence;
                 if (baseSequence!=State.SpeciesSequence)
                 {
                     Send(peer,new { type="speciesConflict",role=peer.Role,clientSequence=sequence,
-                        sequence=State.SpeciesSequence,species=State.Species,editorBudget=State.EditorBudget });
+                        sequence=State.SpeciesSequence,species=State.Species,editorBudget=State.EditorBudget, speciesName=State.SpeciesName,
+                        editorSession=State.EditorSession, editorFinished=State.EditorFinished });
                     return;
                 }
                 State.SpeciesSequence++;
                 State.Species = blob;
-                State.EditorBudget = budget;
+                State.EditorBudget = budget; State.SpeciesName=name;
                 Broadcast(new { type = "speciesLive", role = peer.Role,
-                    sequence = State.SpeciesSequence, clientSequence = sequence, species = blob, editorBudget=State.EditorBudget });
+                    sequence = State.SpeciesSequence, clientSequence = sequence, species = blob, editorBudget=State.EditorBudget, speciesName=State.SpeciesName,
+                        editorSession=State.EditorSession, editorFinished=State.EditorFinished });
                 return;
             }
             if (type == "editorClose")
             {
-                if (!State.InviteAccepted || !State.Evolving)
-                    throw new ArgumentException("Editor is not open in an accepted session");
+                if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
+                long session=Integer(data,"editorSession",1,long.MaxValue);
+                // A second completion, or a delayed close from an old visit, is harmless.
+                if (!State.Evolving || session!=State.EditorSession) return;
+                bool finished=Boolean(data,"editorFinished");
                 string blob = Text(data, "species", 350000);
                 int budget=(int)Integer(data,"editorBudget",0,100000000);
+                string name=SpeciesName(data);
                 ValidateBlob(blob);
                 if (!String.IsNullOrEmpty(blob))
                 {
                     State.Species = blob;
                     State.SpeciesSequence++;
-                    State.EditorBudget=budget;
+                    State.EditorBudget=budget; State.SpeciesName=name;
                 }
+                State.EditorFinished=finished && !String.IsNullOrEmpty(blob);
                 State.Evolving = false;
                 State.Editor = null;
                 State.EditorID = 0;
@@ -716,7 +742,8 @@ namespace SporeCoop
                 Pending = null;
                 Changed();
                 Broadcast(new { type = "editorClosed", role = peer.Role,
-                    sequence = State.SpeciesSequence, species = State.Species, editorBudget=State.EditorBudget });
+                    sequence = State.SpeciesSequence, species = State.Species, editorBudget=State.EditorBudget, speciesName=State.SpeciesName,
+                        editorSession=State.EditorSession, editorFinished=State.EditorFinished });
                 return;
             }
             if (type == "requestEvolution")

@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 5;
+    constexpr int kProtocol = 6;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -326,6 +326,7 @@ namespace
             gSnapshot.speciesAck = 0; gSnapshot.speciesConflict = false;
             gSnapshot.speciesBlob.clear();
             gSnapshot.editorBudget = -1;
+            gSnapshot.speciesName.clear(); gSnapshot.editorFinished=false; gSnapshot.editorSession=0;
             return;
         }
 
@@ -556,6 +557,9 @@ namespace
             std::uint64_t speciesSequence = 0;
             if (ReadNumber(json, "speciesSequence", number))
                 speciesSequence = static_cast<std::uint64_t>(number);
+            std::string speciesName; ReadString(json,"speciesName",speciesName);
+            bool editorFinished=false; ReadBool(json,"editorFinished",editorFinished);
+            double editorSession=0; ReadNumber(json,"editorSession",editorSession);
             int editorBudget = -1;
             if (ReadNumber(json,"editorBudget",number) && number >= 0 && number <= 100000000 && std::floor(number)==number)
                 editorBudget = static_cast<int>(number);
@@ -575,6 +579,7 @@ namespace
                 gSnapshot.speciesSequence = 0;
                 gSnapshot.speciesBlob.clear();
                 gSnapshot.editorBudget = -1;
+                gSnapshot.speciesName.clear(); gSnapshot.editorFinished=false; gSnapshot.editorSession=0;
                 gSnapshot.speciesAck = 0;
                 gSnapshot.speciesConflict = false;
             }
@@ -603,6 +608,9 @@ namespace
                 gSnapshot.speciesSequence = speciesSequence;
                 gSnapshot.speciesBlob = std::move(species);
                 gSnapshot.editorBudget = editorBudget;
+                gSnapshot.speciesName=speciesName;
+                gSnapshot.editorSession=static_cast<std::uint64_t>(editorSession);
+                gSnapshot.editorFinished=editorFinished;
             }
             return;
         }
@@ -627,14 +635,22 @@ namespace
             if (!ReadString(json, "role", role) ||
                 !ReadString(json, "species", species) ||
                 !ReadNumber(json, "sequence", sequence)) return;
+            std::string name; ReadString(json,"speciesName",name);
+            bool finished=false; ReadBool(json,"editorFinished",finished);
+            double session=0; ReadNumber(json,"editorSession",session);
             double budget = -1;
             if (!ReadNumber(json,"editorBudget",budget) || budget < 0 || budget > 100000000 || std::floor(budget)!=budget) return;
             std::lock_guard<std::mutex> lock(gMutex);
+            if (type=="editorClosed" && (static_cast<std::uint64_t>(sequence)<gSnapshot.speciesSequence ||
+                static_cast<std::uint64_t>(session)!=gSnapshot.editorSession)) return;
             if (static_cast<std::uint64_t>(sequence) >= gSnapshot.speciesSequence)
             {
                 gSnapshot.speciesSequence = static_cast<std::uint64_t>(sequence);
                 gSnapshot.speciesBlob = std::move(species);
                 gSnapshot.editorBudget = static_cast<int>(budget);
+                gSnapshot.speciesName=name;
+                gSnapshot.editorSession=static_cast<std::uint64_t>(session);
+                gSnapshot.editorFinished=finished;
             }
             if (role == gRole && type != "editorClosed")
             {
@@ -996,24 +1012,25 @@ namespace CoopNet
             NextEventID("progress") + "\"," + ProgressFields(delta, absoluteUnlocks, true) + "}");
     }
 
-    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies, int budget)
+    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies, int budget, const std::string& name)
     {
         Queue("{\"type\":\"editorOpen\",\"editorId\":" +
-            std::to_string(static_cast<unsigned long long>(editorID)) + ",\"species\":\"" + JsonEscape(initialSpecies) + "\",\"editorBudget\":" + std::to_string(budget) + "}");
+            std::to_string(static_cast<unsigned long long>(editorID)) + ",\"species\":\"" + JsonEscape(initialSpecies) + "\",\"editorBudget\":" + std::to_string(budget) + ",\"speciesName\":\"" + JsonEscape(name) + "\"}");
     }
 
-    void SubmitEditorClose(const std::string& speciesBlob, int budget)
+    void SubmitEditorClose(const std::string& speciesBlob, int budget, const std::string& name, std::uint64_t session, bool finished)
     {
         Queue("{\"type\":\"editorClose\",\"species\":\"" +
-            JsonEscape(speciesBlob) + "\",\"editorBudget\":" + std::to_string(budget) + "}");
+            JsonEscape(speciesBlob) + "\",\"editorSession\":" + std::to_string(session) +
+            ",\"editorFinished\":" + (finished ? "true" : "false") + ",\"editorBudget\":" + std::to_string(budget) + ",\"speciesName\":\"" + JsonEscape(name) + "\"}");
     }
 
-    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence, int budget)
+    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence, int budget, const std::string& name)
     {
         const auto sequence=gSpeciesSequence++;
         Queue("{\"type\":\"speciesLive\",\"sequence\":" +
             std::to_string(sequence) + ",\"baseSequence\":" + std::to_string(baseSequence) + ",\"species\":\"" +
-            JsonEscape(speciesBlob) + "\",\"editorBudget\":" + std::to_string(budget) + "}");
+            JsonEscape(speciesBlob) + "\",\"editorBudget\":" + std::to_string(budget) + ",\"speciesName\":\"" + JsonEscape(name) + "\"}");
         return sequence;
     }
 }

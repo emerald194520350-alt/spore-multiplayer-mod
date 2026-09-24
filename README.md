@@ -1,8 +1,8 @@
-# spore multiplayer mod beta 4
+# spore multiplayer mod beta 5
 
 SporeCoop is an experimental local co-op mod for SPORE. It is designed to let two SPORE instances on the same PC share a game session, with a future LAN/Radmin VPN mode planned for remote players.
 
-The project is currently **Beta 4** (protocol 5), an experimental prerelease. Update both game DLLs and the session server together: Beta 1–3 cannot join this build. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes, validation and installation.
+The project is currently **Beta 5** (protocol 6), an experimental prerelease. Update both game DLLs and the session server together: Beta 1–4 cannot join this build. This update adds shared species names and mirrors successful evolution-editor acceptance after receiving the final creature. Crashes, visual differences, desynchronisation, and unsupported stages are still possible. See [release notes](RELEASE_NOTES.md) for changes, validation and installation.
 
 Beta 2 adds native articulated-body movement, growth-aware world coordinates,
 shared object interactions and NPC interpolation. Cell progress now invokes

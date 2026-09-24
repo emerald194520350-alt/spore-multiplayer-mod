@@ -36,6 +36,7 @@
 #include "CoopUi.h"
 #include <Spore/Simulator/Cell/cCellGFX.h>
 #include <Spore/Editors/BakeManager.h>
+#include <Spore/Editors/EditorUI.h>
 #include <cmath>
 
 namespace
@@ -184,6 +185,10 @@ namespace
     std::uint64_t gEditorEntrySpeciesSequence = 0;
     bool gEditorInitialModelPending = false;
     std::string gLastLocalSpecies;
+    std::string gLastLocalName, gPendingName, gLastEditorName;
+    std::uint64_t gSharedEditorSession = 0;
+    std::uint64_t gClosedEditorSession = 0;
+    bool gEditorAcceptRequested = false, gRemoteEditorFinish = false;
     uint64_t gAppliedSpeciesSequence = 0;
     uint64_t gPendingSpeciesSequence = 0;
     std::string gPendingSpecies;
@@ -1714,6 +1719,68 @@ namespace
         gLastEditorBudget = budget;
     }
 
+    std::string ReadEditorName()
+    {
+        auto editor=Editors::GetEditor();
+        if (!editor || !editor->GetEditorModel()) return {};
+        const char16_t* name=editor->GetName();
+        // NamePanel commits its text on blur. Include text still being edited.
+        auto panel=editor->mpEditorNamePanel.get();
+        if (panel && panel->mpLayout)
+            if (auto field=panel->mpLayout->FindWindowByID(0xC7CEB1BD)) name=field->GetCaption();
+        size_t count=0; if (name) while (name[count] && count<512) ++count;
+        const auto bytes=reinterpret_cast<const unsigned char*>(name);
+        return count ? Base64Encode(std::vector<unsigned char>(bytes,bytes+count*2)) : std::string{};
+    }
+
+    void ApplyEditorName(const std::string& wire)
+    {
+        std::vector<unsigned char> bytes;
+        if ((!wire.empty() && !Base64Decode(wire,bytes)) || bytes.size()%2 || bytes.size()>1024) return;
+        std::u16string name(bytes.size()/2,u'\0');
+        if (!bytes.empty()) memcpy(&name[0],bytes.data(),bytes.size());
+        auto editor=Editors::GetEditor();
+        if (!editor || !editor->GetEditorModel()) return;
+        editor->SetName(name.c_str());
+        auto panel=editor->mpEditorNamePanel.get();
+        if (panel && panel->mpLayout)
+        {
+            if (auto field=panel->mpLayout->FindWindowByID(0xC7CEB1BD)) field->SetCaption(name.c_str());
+            if (auto label=panel->mpLayout->FindWindowByID(0xD0E6D04B))
+                label->SetCaption(name.empty() ? panel->field_24.c_str() : name.c_str());
+        }
+        gLastEditorName=wire;
+    }
+
+    // Native EditorUI dispatch (5E007B -> 5DFD40) uses COMMAND 0x102 for
+    // validated save-and-exit and 0x103 for cancel. These are not control IDs.
+    UTFWin::IWindow* FindEditorAccept(UTFWin::IWindow* window, int depth=0)
+    {
+        if (!window || depth>16 || !window->IsVisible() || !window->IsEnabled()) return nullptr;
+        if (window->GetCommandID()==0x102) return window;
+        for (auto child : window->children())
+            if (auto found=FindEditorAccept(child,depth+1)) return found;
+        return nullptr;
+    }
+
+    using EditorUIMessageFunction=bool(__thiscall*)(UTFWin::IWinProc*,UTFWin::IWindow*,const UTFWin::Message&);
+    EditorUIMessageFunction gEditorUIMessageOriginal=nullptr;
+    bool gEditorUIHookAttached=false;
+    bool __fastcall EditorUIMessageHook(UTFWin::IWinProc* self, void*, UTFWin::IWindow* window, const UTFWin::Message& message)
+    {
+        if (gWasEditorMode && message.eventType==UTFWin::kMsgButtonClick && message.source)
+        {
+            const auto command=message.source->GetCommandID();
+            if (command>=0x100 && command<=0x107)
+            {
+                gEditorAcceptRequested=command==0x102;
+                gLastEditorName=ReadEditorName();
+                gLastEditorBudget=CommittedEditorBudget();
+            }
+        }
+        return gEditorUIMessageOriginal(self,window,message);
+    }
+
     bool ApplyEditorModel(const std::string& blob, int budget)
     {
         auto editor = Editors::GetEditor();
@@ -1734,8 +1801,8 @@ namespace
         if (model->mRigblocks.empty()) { delete model; return false; }
         auto limits = editor->mpEditorLimits.get();
         if (!limits || !CoopEditor::ValidBudget(budget)) { delete model; return false; }
-        // SCP1 carries body and paint; names are local editor metadata. Load
-        // clears them, so preserve them before the old model is disposed.
+        // SCP1 carries body and paint. Preserve metadata across model disposal;
+        // the revision's shared name is applied separately by UpdateSharedEditor.
         model->mName = previous->mName;
         model->mDescription = previous->mDescription;
         model->mAcceptedName = previous->mAcceptedName;
@@ -1796,6 +1863,8 @@ namespace
         if (!snapshot.inviteAccepted)
         {
             gWasEditorMode = false;
+            gSharedEditorSession=0; gClosedEditorSession=0; gRemoteEditorFinish=false; gEditorAcceptRequested=false;
+            gLastLocalName.clear(); gPendingName.clear(); gLastEditorName.clear();
             gObservedEditorModel = nullptr;
             gEditorHistoryPending = false;
             gEditorInitialModelPending = false;
@@ -1835,7 +1904,8 @@ namespace
             gMirroredEditorRequestTick = 0;
         }
 
-        if (snapshot.editorOpen && snapshot.editorRole != CoopNet::GetRole() &&
+        if (snapshot.editorOpen && snapshot.editorRole != CoopNet::GetRole() && !gWasEditorMode &&
+            snapshot.editorSession!=gClosedEditorSession &&
             !editorActive && Simulator::IsCellGame() && snapshot.editorID != 0)
         {
             // Entering the editor takes several frames.  Re-sending the engine
@@ -1846,6 +1916,7 @@ namespace
             {
                 gMirroredEditorRequestID = snapshot.editorID;
                 gMirroredEditorRequestTick = now;
+                gSharedEditorSession=snapshot.editorSession;
                 OpenMirroredEditor(snapshot);
             }
             return;
@@ -1861,7 +1932,16 @@ namespace
             editor->CommitEditHistory(true);
             gEditorHistoryPending = false;
         }
-        if (editorReady) gLastEditorBudget = CommittedEditorBudget();
+        if (editorActive && snapshot.editorOpen) gSharedEditorSession=snapshot.editorSession;
+        if (editorReady)
+        {
+            gLastEditorBudget = CommittedEditorBudget();
+            gLastEditorName=ReadEditorName();
+        }
+        if (editorActive && gEditorAcceptRequested && editor->mpEditorUI &&
+            !FindEditorAccept(editor->mpEditorUI->mMainUI.GetContainerWindow()) &&
+            !FindEditorAccept(editor->mpEditorUI->mSharedUI.GetContainerWindow()))
+            return; // Native saving disabled its controls; do not replace its model.
         // A cache key handed to the campaign entry is not proof that the
         // editor loaded it. Cell can fall back to a default green body. Apply
         // the authoritative resource explicitly before this peer can publish.
@@ -1870,6 +1950,9 @@ namespace
             if (snapshot.speciesBlob.empty() || !ApplyEditorModel(snapshot.speciesBlob,snapshot.editorBudget)) return;
             gAppliedSpeciesSequence = snapshot.speciesSequence;
             gEditorEntrySpeciesSequence = snapshot.speciesSequence;
+            ApplyEditorName(snapshot.speciesName);
+            gLastLocalName=snapshot.speciesName;
+            gRemoteEditorFinish=false; gEditorAcceptRequested=false;
             gLastLocalSpecies = snapshot.speciesBlob;
             gLastLocalBudget = snapshot.editorBudget;
             gPendingSpeciesSequence = 0; gPendingSpecies.clear();
@@ -1880,6 +1963,8 @@ namespace
         }
         if (editorActive && !gWasEditorMode)
         {
+            gRemoteEditorFinish=false; gEditorAcceptRequested=false;
+            gLastLocalName=ReadEditorName();
             gLastLocalSpecies=SerializeEditorModel();
             gLastLocalBudget=CommittedEditorBudget();
             if (!CoopEditor::ValidBudget(gLastLocalBudget)) return;
@@ -1893,7 +1978,7 @@ namespace
                 // species belongs to the previous visit. Do not reload that
                 // old body/paint while the new editor is opening.
                 gAppliedSpeciesSequence = snapshot.speciesSequence;
-                CoopNet::SubmitEditorOpen(editor->mEditorName,gLastLocalSpecies,gLastLocalBudget);
+                CoopNet::SubmitEditorOpen(editor->mEditorName,gLastLocalSpecies,gLastLocalBudget,gLastLocalName);
             }
         }
 
@@ -1906,20 +1991,47 @@ namespace
         {
             if (ApplyEditorModel(snapshot.speciesBlob,snapshot.editorBudget))
             {
+                ApplyEditorName(snapshot.speciesName);
+                gLastLocalName=snapshot.speciesName;
                 gLastLocalSpecies=snapshot.speciesBlob;
                 gLastLocalBudget=snapshot.editorBudget;
                 gAppliedSpeciesSequence=snapshot.speciesSequence;
                 gPendingSpeciesSequence=0; gPendingSpecies.clear();
+                // SetEditorModel invalidates the readiness sampled above. Never
+                // click Accept in this frame; wait for loading and history next tick.
+                return;
+            }
+        }
+
+        if (editorActive && gWasEditorMode && !snapshot.editorOpen && snapshot.editorFinished &&
+            snapshot.editorSession==gSharedEditorSession && gSharedEditorSession!=0 &&
+            gAppliedSpeciesSequence==snapshot.speciesSequence && !gRemoteEditorFinish &&
+            !gEditorHistoryPending && !editor->mpMovingPart && !editor->mMouseState.IsLeftButtonDown)
+        {
+            auto ui=editor->mpEditorUI;
+            auto button=ui ? FindEditorAccept(ui->mMainUI.GetContainerWindow()) : nullptr;
+            if (!button && ui) button=FindEditorAccept(ui->mSharedUI.GetContainerWindow());
+            if (button && gEditorUIHookAttached)
+            {
+                ApplyEditorName(snapshot.speciesName);
+                if (editor->mpEditorNamePanel) editor->mpEditorNamePanel->SetExtended(false);
+                IWindowPtr retained=button;
+                gRemoteEditorFinish=true; // Suppress the echo when native saving completes.
+                UTFWin::Message click{}; click.eventType=UTFWin::kMsgButtonClick; click.source=button;
+                button->SendMsg(click);
+                WriteProbeLog("EditorSync: remote final revision loaded; native Accept dispatched once.");
+                return;
             }
         }
 
         if (editorActive && snapshot.editorOpen && now-gLastSpeciesTick>=100)
         {
             auto current=SerializeEditorModel();
+            auto currentName=ReadEditorName();
             auto currentBudget=CommittedEditorBudget();
             if (gPendingSpeciesSequence && snapshot.speciesAck>=gPendingSpeciesSequence)
             {
-                if (!snapshot.speciesConflict) { gLastLocalSpecies=gPendingSpecies; gLastLocalBudget=gPendingBudget; }
+                if (!snapshot.speciesConflict) { gLastLocalSpecies=gPendingSpecies; gLastLocalBudget=gPendingBudget; gLastLocalName=gPendingName; }
                 gPendingSpeciesSequence=0; gPendingSpecies.clear();
             }
             if (!gPendingSpeciesSequence && !current.empty())
@@ -1942,6 +2054,9 @@ namespace
                                 ApplyEditorBudget(mergedBudget);
                                 editor->CommitEditHistory(true);
                             }
+                            const auto mergedName=currentName==gLastLocalName ? snapshot.speciesName : currentName;
+                            ApplyEditorName(mergedName); currentName=mergedName;
+                            gLastLocalName=snapshot.speciesName;
                             currentBudget=mergedBudget;
                             current=value; gLastLocalSpecies=snapshot.speciesBlob;
                             gLastLocalBudget=snapshot.editorBudget;
@@ -1950,11 +2065,11 @@ namespace
                     }
                     else WriteProbeLog("Editor topology conflict: preserving local model; finish the current edit before retrying.");
                 }
-                if (gAppliedSpeciesSequence==snapshot.speciesSequence && current!=gLastLocalSpecies)
+                if (gAppliedSpeciesSequence==snapshot.speciesSequence && (current!=gLastLocalSpecies || currentName!=gLastLocalName))
                 {
-                    gPendingSpecies=current;
+                    gPendingSpecies=current; gPendingName=currentName;
                     gPendingBudget=currentBudget;
-                    gPendingSpeciesSequence=CoopNet::SubmitSpecies(current,gAppliedSpeciesSequence,currentBudget);
+                    gPendingSpeciesSequence=CoopNet::SubmitSpecies(current,gAppliedSpeciesSequence,currentBudget,currentName);
                     char line[160]{};
                     sprintf_s(line,"EditorSync: sent committed model client=%llu base=%llu bytes=%u",
                         gPendingSpeciesSequence,gAppliedSpeciesSequence,unsigned(current.size()));
@@ -1966,11 +2081,17 @@ namespace
 
         if (!editorActive && gWasEditorMode)
         {
+            // Native acceptance may leave editor mode before the campaign's
+            // save callback has installed the new creature key.
+            if (gEditorAcceptRequested && !Simulator::IsCellGame()) return;
             auto game=Simulator::Cell::cCellGame::Get();
             auto data=game ? game->mpSerializableData.get() : nullptr;
             auto saved=data ? SerializeCreation(data->mPlayerCreatureKey) : std::string{};
-            if (CoopEditor::ValidBudget(gLastEditorBudget))
-                CoopNet::SubmitEditorClose(saved.empty() ? (gPendingSpecies.empty() ? gLastLocalSpecies : gPendingSpecies) : saved,gLastEditorBudget);
+            if (!gRemoteEditorFinish && gSharedEditorSession && CoopEditor::ValidBudget(gLastEditorBudget))
+                CoopNet::SubmitEditorClose(saved.empty() ? (gPendingSpecies.empty() ? gLastLocalSpecies : gPendingSpecies) : saved,
+                    gLastEditorBudget,gLastEditorName,gSharedEditorSession,gEditorAcceptRequested);
+            gRemoteEditorFinish=false; gEditorAcceptRequested=false;
+            gClosedEditorSession=gSharedEditorSession;
             gPendingSpeciesSequence=0; gPendingSpecies.clear();
             gJoinedPlayerPlaced=false;
             gWorldCoordinates = CoopWorld::Coordinates{};
@@ -2823,6 +2944,9 @@ namespace
 
         if (snapshot.worldGeneration != gObservedWorldGeneration)
         {
+            gSharedEditorSession=0; gClosedEditorSession=0;
+            gRemoteEditorFinish=false; gEditorAcceptRequested=false;
+            gLastLocalName.clear(); gPendingName.clear(); gLastEditorName.clear();
             gObservedWorldGeneration = snapshot.worldGeneration;
             gWorldActionApplied = 0;
             gProgressSync.Reset();
@@ -3158,7 +3282,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Protocol 5: verified world-growth coordinates and shared object interactions enabled."
+            ? "Protocol 6: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
@@ -3202,8 +3326,11 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
                     CreateMutexAHook) == NO_ERROR;
             }
         }
+        gEditorUIMessageOriginal=reinterpret_cast<EditorUIMessageFunction>(GetAddress(Editors::EditorUI,HandleUIMessage));
+        if (gEditorUIMessageOriginal)
+            gEditorUIHookAttached=DetourAttach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook)==NO_ERROR;
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        if (CommitDetours() != NO_ERROR) { gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; }
+        if (CommitDetours() != NO_ERROR) { gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
@@ -3220,6 +3347,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             DetourDetach(reinterpret_cast<PVOID*>(&gCreateMutexAOriginal),
                 CreateMutexAHook);
         }
+        if (gEditorUIHookAttached) DetourDetach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook);
         ProfilePathsDetour::detach();
         CommitDetours();
     }

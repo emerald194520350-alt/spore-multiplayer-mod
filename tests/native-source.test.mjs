@@ -61,7 +61,7 @@ assert.match(probe, /GetRemoveCellFunction\(\)[\s\S]*MatchesRemovalAbi/,
 
 assert.match(net, /std::uint64_t gSpeciesSequence = 1;/,
   'The first appearance sequence must be newer than the zero-initialized receiver state');
-assert.match(net, /constexpr int kProtocol = 5;/,
+assert.match(net, /constexpr int kProtocol = 6;/,
   'The native client must reject older incompatible protocol builds');
 assert.doesNotMatch(updateRemote,
   /ResourceKey\(snapshot\.remoteModelInstance[\s\S]*snapshot\.remoteModelGroup\)/,

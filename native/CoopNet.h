@@ -115,6 +115,9 @@ namespace CoopNet
         bool speciesConflict = false;
         std::string speciesBlob;
         int editorBudget = -1;
+        std::string speciesName; // Base64 UTF-16LE, independent of JSON escaping.
+        std::uint64_t editorSession = 0;
+        bool editorFinished = false;
     };
 
     bool StartFromEnvironment();
@@ -138,7 +141,7 @@ namespace CoopNet
     void SeedProgress(const CellProgress& progress);
     void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
         const std::array<int, 13>& absoluteUnlocks);
-    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies, int budget);
-    void SubmitEditorClose(const std::string& speciesBlob, int budget);
-    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence, int budget);
+    void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies, int budget, const std::string& name);
+    void SubmitEditorClose(const std::string& speciesBlob, int budget, const std::string& name, std::uint64_t session, bool finished);
+    std::uint64_t SubmitSpecies(const std::string& speciesBlob, std::uint64_t baseSequence, int budget, const std::string& name);
 }

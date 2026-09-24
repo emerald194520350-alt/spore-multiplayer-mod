@@ -313,6 +313,20 @@ int main(int argc, char** argv)
         Check(gSnapshot.speciesSequence == 2 && gSnapshot.speciesBlob == "body-with-spikes",
             "An older snapshot in the same campaign cannot undo a newer live edit");
         Check(gSnapshot.editorBudget==6,"Older full snapshots cannot overwrite a newer budget");
+        HandleMessage(R"({"type":"speciesLive","role":"guest","sequence":3,"species":"body-with-spikes","editorBudget":6,"speciesName":"KAQ4BD8E","editorSession":7})");
+        Check(gSnapshot.speciesName=="KAQ4BD8E" && gSnapshot.editorSession==7 && !gSnapshot.editorFinished,
+            "Native client keeps the shared name and editor visit with the model");
+        HandleMessage(R"({"type":"editorClosed","role":"guest","sequence":4,"species":"final","editorBudget":6,"speciesName":"KAQ4BD8E","editorSession":7,"editorFinished":true})");
+        Check(!gSnapshot.editorOpen && gSnapshot.editorFinished && gSnapshot.speciesBlob=="final" && gSnapshot.speciesName=="KAQ4BD8E",
+            "Final creature, name and acceptance become visible atomically");
+        HandleMessage(R"({"type":"state","worldGeneration":51,"evolving":true,"speciesSequence":5,"species":"new","editorBudget":6,"speciesName":"","editorSession":8,"editorFinished":false})");
+        HandleMessage(R"({"type":"editorClosed","role":"guest","sequence":4,"species":"final","editorBudget":6,"speciesName":"KAQ4BD8E","editorSession":7,"editorFinished":true})");
+        Check(gSnapshot.editorOpen && !gSnapshot.editorFinished && gSnapshot.editorSession==8 && gSnapshot.speciesName.empty(),
+            "An old close cannot close the new editor visit");
+        CoopNet::SubmitEditorClose("final",6,"KAQ4BD8E",8,true);
+        const auto closing=gOutgoing.back();
+        Check(closing.find(R"("editorSession":8)")!=std::string::npos && closing.find(R"("editorFinished":true)")!=std::string::npos,
+            "Native finish packet includes its session and explicit acceptance");
         gSnapshot.sessionEnded = false;
         gSnapshot.connected = gSnapshot.inviteAccepted = true;
         HandleMessage("{\"type\":\"sessionEnded\",\"reason\":\"host_left\"}");

@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 5, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 6, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -288,18 +288,22 @@ try {
     'Both editors enter with the same native DNA budget');
   check(state.evolving && mirroredEditor.evolving && state.editorId === 12345,
     'Opening an editor mirrors its shared editor state');
+  const sharedName=Buffer.from('Шип \"двойной\" 🦠','utf16le').toString('base64');
+  const firstEditorSession=state.editorSession;
   const liveSpecies = Buffer.from('live-editor-model-v1').toString('base64');
   const liveOnGuest = await host.request({
-    type: 'speciesLive', editorBudget:6, sequence: 0, baseSequence: state.speciesSequence, species: liveSpecies
+    type: 'speciesLive', speciesName:sharedName, editorBudget:6, sequence: 0, baseSequence: state.speciesSequence, species: liveSpecies
   }, m => m.type === 'speciesLive' && m.role === 'host');
   const liveOnHost = await guest.wait(m => m.type === 'speciesLive' && m.role === 'host');
   check(liveOnGuest.editorBudget===6 && liveOnHost.editorBudget===6,
     'A ten-DNA purchase broadcasts model and remaining DNA in the same revision');
   check(liveOnGuest.species === liveSpecies && liveOnHost.species === liveSpecies,
     'Live creature edits are broadcast byte-for-byte');
+  check(liveOnGuest.speciesName===sharedName && liveOnHost.speciesName===sharedName, 'Unicode species name shares the same revision as body and DNA');
   const staleEditor=await guest.request({type:'speciesLive',editorBudget:6,sequence:0,baseSequence:0,species:Buffer.from('stale').toString('base64')},m=>m.type==='speciesConflict');
   check(staleEditor.species===liveSpecies && staleEditor.clientSequence===0,'Stale editor updates return the current model instead of overwriting the peer');
   check(staleEditor.editorBudget===6,'A stale concurrent edit receives the authoritative budget for rebasing');
+  check(staleEditor.speciesName===sharedName, 'A conflicting edit receives the authoritative name for rebasing');
   const nextEdit=Buffer.from('guest-added-mouth').toString('base64');
   const edited=await guest.request({type:'speciesLive',editorBudget:6,sequence:1,baseSequence:staleEditor.sequence,species:nextEdit},m=>m.type==='speciesLive'&&m.role==='guest');
   check(edited.editorBudget===6 && edited.species===nextEdit && edited.clientSequence===1,'Edits from player two are acknowledged and broadcast to player one');
@@ -307,18 +311,43 @@ try {
   check(refunded.editorBudget===16 && refunded.species===liveSpecies,'Undo returns both the old model and its refunded budget');
   await failure(guest,{type:'speciesLive',editorBudget:-4,sequence:3,baseSequence:refunded.sequence,species:liveSpecies},'editorBudget');
   const finalLiveSpecies = Buffer.from('live-editor-model-v2').toString('base64');
-  state = await guest.request({ type: 'editorClose', editorBudget:6, species: finalLiveSpecies }, stateMessage(state.revision + 1));
+  state = await guest.request({ type: 'editorClose', editorSession:state.editorSession, editorFinished:true, speciesName:Buffer.from('Шип \"двойной\" 🦠','utf16le').toString('base64'), editorBudget:6, species: finalLiveSpecies }, stateMessage(state.revision + 1));
   const editorClosedHost = await host.wait(stateMessage(state.revision));
   check(state.editorBudget===6 && editorClosedHost.editorBudget===6,'Final editor snapshot retains the submitted budget');
   check(!state.evolving && !editorClosedHost.evolving && state.species === finalLiveSpecies,
     'Either player can finish the mirrored editor with the same creature');
 
+  check(state.editorFinished && editorClosedHost.editorFinished && state.speciesName===sharedName,
+    'Guest acceptance delivers final name and completion together to both peers');
+  const closedRevision=state.revision;
+  host.send({type:'editorClose',editorSession:firstEditorSession,editorFinished:true,editorBudget:999,species:liveSpecies,speciesName:''});
+  state=await host.request({type:'snapshot'},m=>m.type==='state' && m.revision>=closedRevision);
+  check(state.revision===closedRevision && state.species===finalLiveSpecies && state.speciesName===sharedName,
+    'Duplicate completion cannot replace the saved final creature');
   state = await host.request({ type: 'editorOpen', editorBudget:16, editorId: 54321 }, stateMessage(state.revision + 1));
   await guest.wait(stateMessage(state.revision));
-  state = await guest.request({ type: 'editorClose', editorBudget:6, species: '' }, stateMessage(state.revision + 1));
+  check(!state.editorFinished && state.editorSession>firstEditorSession, 'New editor visits clear the old completion');
+  host.send({type:'editorClose',editorSession:firstEditorSession,editorFinished:true,editorBudget:6,species:finalLiveSpecies});
+  const stillOpen=await host.request({type:'snapshot'},m=>m.type==='state' && m.editorSession===state.editorSession);
+  check(stillOpen.evolving && stillOpen.species==='', 'Late completion from the previous visit cannot close a new editor');
+  state = await guest.request({ type: 'editorClose', editorSession:state.editorSession, editorFinished:false, editorBudget:6, species: '' }, stateMessage(state.revision + 1));
   await host.wait(stateMessage(state.revision));
   check(!state.evolving && state.species === '',
     'An empty final editor snapshot unlocks the world without erasing the last valid creature');
+
+  check(!state.editorFinished, 'Cancel never instructs the other game to accept its creature');
+
+  state=await guest.request({type:'editorOpen',editorId:12345,editorBudget:6,species:finalLiveSpecies,speciesName:sharedName},stateMessage(state.revision+1));
+  await host.wait(stateMessage(state.revision));
+  await failure(guest,{type:'speciesLive',sequence:3,baseSequence:state.speciesSequence,editorBudget:6,species:finalLiveSpecies,speciesName:'AA=='},'speciesName');
+  const renamed=await guest.request({type:'speciesLive',sequence:3,baseSequence:state.speciesSequence,editorBudget:6,species:finalLiveSpecies,speciesName:''},m=>m.type==='speciesLive' && m.clientSequence===3);
+  const renamedOnHost=await host.wait(m=>m.type==='speciesLive' && m.clientSequence===3);
+  check(renamed.speciesName==='' && renamedOnHost.speciesName==='' && renamed.editorBudget===6 && renamed.species===finalLiveSpecies,
+    'Player two can clear the name without changing body or DNA');
+  state=await host.request({type:'editorClose',editorSession:state.editorSession,editorFinished:true,editorBudget:6,species:finalLiveSpecies,speciesName:sharedName},stateMessage(state.revision+1));
+  const acceptedOnGuest=await guest.wait(stateMessage(state.revision));
+  check(acceptedOnGuest.editorFinished && acceptedOnGuest.speciesName===sharedName && acceptedOnGuest.species===finalLiveSpecies,
+    'Host acceptance also delivers final name and creature to the guest');
 
   await guest.request({ type: 'requestEvolution' }, m => m.type === 'evolutionRequestAccepted');
   const requested = await host.wait(m => m.type === 'evolutionRequested');
