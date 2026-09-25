@@ -78,6 +78,56 @@ int main(int argc, char** argv)
         Check(TestSharedWorld(),"Shared world coordinates, editor rebase and mission increments");
         TestPeerIndicator();
         Check(true,"Off-screen indicator covers all edges, corners, aspect ratios and invalid inputs");
+        {
+            CoopVisual::SavedEditorAppearance savedAppearance;
+            struct Key { std::uint32_t instanceID,typeID,groupID; } localKey{222,0x2b978c46,0};
+            CoopNet::Snapshot completed;
+            completed.inviteAccepted=true; completed.editorFinished=true;
+            completed.worldGeneration=2; completed.remotePeerGeneration=3;
+            completed.editorSession=4; completed.speciesSequence=7;
+            completed.speciesBlob="authoritative-final-body-and-paint";
+            completed.hasRemotePosition=completed.hasRemoteAppearance=true;
+            completed.remoteModelInstance=completed.remoteAppearanceModelInstance=111;
+            completed.remoteModelType=completed.remoteAppearanceModelType=localKey.typeID;
+            completed.remoteAppearanceBlob=completed.speciesBlob;
+            Check(!savedAppearance.Matches(completed,localKey),"Appearance reuse requires a completed native save");
+            Check(savedAppearance.Remember(completed,7,localKey) && savedAppearance.Matches(completed,localKey),
+                "Shared final body uses the saved local key despite profile-local resource normalization");
+            Check(savedAppearance.Canonical(completed,localKey) &&
+                *savedAppearance.Canonical(completed,localKey)==completed.speciesBlob,
+                "Mirrored save republishes the authoritative body so the initiating player also recognizes it");
+            auto changed=completed; changed.remoteAppearanceBlob="different-color-or-parts";
+            Check(!savedAppearance.Matches(changed,localKey),"Different incoming paint/body cannot alias the saved avatar");
+            changed=completed; changed.speciesBlob="different-final-body";
+            Check(!savedAppearance.Matches(changed,localKey),"Changed final model invalidates the saved binding");
+            changed=completed; ++changed.worldGeneration;
+            Check(!savedAppearance.Matches(changed,localKey),"Another world cannot reuse the old editor binding");
+            changed=completed; ++changed.remotePeerGeneration;
+            Check(!savedAppearance.Matches(changed,localKey),"Reconnected peer cannot reuse the old editor binding");
+            changed=completed; ++changed.editorSession;
+            Check(!savedAppearance.Matches(changed,localKey),"New editor session cannot reuse the old binding");
+            changed=completed; ++changed.speciesSequence;
+            Check(!savedAppearance.Matches(changed,localKey),"New model revision cannot reuse the old binding");
+            changed=completed; changed.editorOpen=true;
+            Check(!savedAppearance.Matches(changed,localKey),"Active editor cannot reuse a previous completion");
+            changed=completed; changed.editorFinished=false;
+            Check(!savedAppearance.Matches(changed,localKey),"Cancelled editor cannot reuse a completed appearance");
+            changed=completed; changed.inviteAccepted=false;
+            Check(!savedAppearance.Matches(changed,localKey),"Ended invitation invalidates the binding");
+            changed=completed; ++changed.remoteModelInstance;
+            Check(!savedAppearance.Matches(changed,localKey),"Unpaired position/appearance packets cannot reuse the saved avatar");
+            Check(!savedAppearance.Matches(completed,Key{333,localKey.typeID,0}) &&
+                !savedAppearance.Matches(completed,Key{222,localKey.typeID,1}),
+                "Changed local avatar key or group requires a fresh appearance decision");
+            Check(!savedAppearance.Remember(completed,6,localKey) && !savedAppearance.Matches(completed,localKey),
+                "Unapplied final revision cannot be bound to a native save");
+            changed=completed; changed.editorFinished=false;
+            Check(!savedAppearance.Remember(changed,7,localKey),"Cancellation must not establish a binding");
+            Check(!savedAppearance.Remember(completed,7,Key{}),"Missing native save key must not establish a binding");
+            savedAppearance.Remember(completed,7,localKey); savedAppearance.Reset();
+            Check(!savedAppearance.Matches(completed,localKey),"Reset clears the completed appearance");
+            Check(!savedAppearance.Canonical(completed,localKey),"Reset also stops publishing the previous shared body");
+        }
         NativeGraphicsFixture graphics;
         unsigned char removeCode[CoopEngine::kRemoveCellCodeSize]{};
         const unsigned char removePrologue[] = {0x8b,0x0d,0x04,0x3c,0x6b,0x01,0x83,0xec,0x10,0x55,0x8b,0x6c,0x24,0x18,0x83,0xc1,0x1c,0x55,0xe8,0x29,0xa2,0xcf,0xff};

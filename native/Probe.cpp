@@ -144,6 +144,7 @@ namespace
     uint64_t gObservedRemotePeerGeneration = 0;
     ResourceKey gRemoteCreationKey{};
     cEditorResourcePtr gRemoteAppearanceResource;
+    CoopVisual::SavedEditorAppearance gSavedEditorAppearance;
     std::string gLastNetworkError;
     ULONG64 gLastPositionTick = 0;
     ULONG64 gLastProgressTick = 0;
@@ -855,13 +856,17 @@ namespace
         return now - gLocalCellStableSince >= 750;
     }
 
-    void SubmitLocalAppearance(const ResourceKey& speciesKey, ULONG64 now)
+    void SubmitLocalAppearance(const ResourceKey& speciesKey, ULONG64 now, const CoopNet::Snapshot& snapshot)
     {
         if (speciesKey.instanceID == 0) return;
         if (SameResourceKey(speciesKey, gLastSubmittedAppearanceKey) &&
             gLocalCellResource == gLastSubmittedAppearanceCellResource) return;
         if (now - gLocalAppearanceStableSince < 750) return;
-        const std::string blob = SerializeCreation(speciesKey);
+        // Relay the same authoritative body after a mirrored native save.
+        // This also lets the initiating guest recognize the host's copy when
+        // the guest was the first player to finish the shared editor.
+        const auto canonical=gSavedEditorAppearance.Canonical(snapshot,speciesKey);
+        const std::string blob = canonical ? *canonical : SerializeCreation(speciesKey);
         if (blob.empty())
         {
             gLocalAppearanceStableSince = now;
@@ -887,9 +892,15 @@ namespace
         gRemoteAppearanceResource = nullptr;
         const ResourceKey sourceKey(snapshot.remoteAppearanceModelInstance,
             snapshot.remoteAppearanceModelType, snapshot.remoteAppearanceModelGroup);
-        // Reuse an existing baked creation only after comparing the full resource.
+        // Reuse a creation after a confirmed shared save or full resource match.
         // Equal numeric IDs alone are not enough across isolated profiles.
         auto player=GetLocalPlayerCell();
+        if (player && gSavedEditorAppearance.Matches(snapshot,player->mModelKey))
+        {
+            gRemoteCreationKey=player->mModelKey;
+            WriteProbeLog("Shared evolution appearance: reusing the natively saved avatar for the peer; no foreign bake.");
+            return;
+        }
         // After shared evolution both profiles saved the same creation under
         // different keys. Reuse the avatar's already rendered skin before
         // requesting another bake under a foreign or generated key.
@@ -1156,7 +1167,7 @@ namespace
                 static_cast<unsigned>(localBlob.size()), static_cast<unsigned>(comparedOwnerBlob.size()), sameAppearance);
             WriteProbeLog(line);
         }
-        if (sameAppearance)
+        if (gSavedEditorAppearance.Matches(snapshot,player->mModelKey) || sameAppearance)
         {
             RemoveHostAppearanceProxy("Local species already matches the world owner.");
             return;
@@ -1882,6 +1893,7 @@ namespace
     {
         if (!snapshot.inviteAccepted)
         {
+            gSavedEditorAppearance.Reset();
             gWasEditorMode = false;
             gSharedEditorSession=0; gClosedEditorSession=0; gRemoteEditorFinish=false; gEditorAcceptRequested=false;
             gLastLocalName.clear(); gPendingName.clear(); gLastEditorName.clear();
@@ -1895,6 +1907,7 @@ namespace
         }
         auto editor = Editors::GetEditor();
         const bool editorActive = Simulator::IsEditorMode() && editor && editor->IsActive();
+        if (editorActive) gSavedEditorAppearance.Reset();
         auto model = editorActive ? editor->GetEditorModel() : nullptr;
         if (model != gObservedEditorModel)
         {
@@ -2115,6 +2128,20 @@ namespace
             auto game=Simulator::Cell::cCellGame::Get();
             auto data=game ? game->mpSerializableData.get() : nullptr;
             auto saved=data ? SerializeCreation(data->mPlayerCreatureKey) : std::string{};
+            auto player=GetLocalPlayerCell();
+            // Completion is only bound to the new native avatar after its
+            // campaign save and model load have both installed the same key.
+            if (gEditorAcceptRequested && (!data || !player || saved.empty() ||
+                !SameResourceKey(data->mPlayerCreatureKey,player->mModelKey))) return;
+            if (gRemoteEditorFinish && gEditorAcceptRequested &&
+                snapshot.editorSession==gSharedEditorSession &&
+                gSavedEditorAppearance.Remember(snapshot,gAppliedSpeciesSequence,player->mModelKey))
+            {
+                // An appearance may already have arrived during the save.
+                // Re-evaluate it against this completed native transaction.
+                gRemoteAppearanceAttempted=false;
+                WriteProbeLog("Shared evolution appearance: native save bound to the final shared editor revision.");
+            }
             if (!gRemoteEditorFinish && gSharedEditorSession && CoopEditor::ValidBudget(gLastEditorBudget))
                 CoopNet::SubmitEditorClose(saved.empty() ? (gPendingSpecies.empty() ? gLastLocalSpecies : gPendingSpecies) : saved,
                     gLastEditorBudget,gLastEditorName,gSharedEditorSession,gEditorAcceptRequested);
@@ -3012,6 +3039,7 @@ namespace
 
         if (snapshot.worldGeneration != gObservedWorldGeneration)
         {
+            gSavedEditorAppearance.Reset();
             gSharedEditorSession=0; gClosedEditorSession=0;
             gRemoteEditorFinish=false; gEditorAcceptRequested=false;
             gLastLocalName.clear(); gPendingName.clear(); gLastEditorName.clear();
@@ -3059,6 +3087,7 @@ namespace
         }
 
         UpdateSharedEditor(snapshot, now);
+        if (gWasEditorMode && gEditorAcceptRequested) return; // Await the native save/avatar handoff.
 
         if (Simulator::IsCellGame() && !snapshot.editorOpen)
         {
@@ -3086,7 +3115,7 @@ namespace
                     gJoinedPlayerPlaced = true;
                 }
                 UpdateLocalCellStability(player, speciesKey, now);
-                SubmitLocalAppearance(speciesKey, now);
+                SubmitLocalAppearance(speciesKey, now, snapshot);
                 const auto& position = player->GetPosition();
                 static ULONG64 lastMovementTrace = 0;
                 static const bool traceMovement = GetEnvironmentVariableA(

@@ -26,11 +26,20 @@ assert.match(updateRemote,/if \(!CoopVisual::AppearanceMatchesPosition\(snapshot
   'New positions after evolution must not render the old cached creature');
 const updateStability = body(probe, 'bool UpdateLocalCellStability(', 'void SubmitLocalAppearance(');
 const submitAppearance = body(probe, 'void SubmitLocalAppearance(', 'void ApplyRemoteAppearance(');
+assert.match(submitAppearance,/gSavedEditorAppearance\.Canonical\(snapshot,speciesKey\)[\s\S]*canonical \? \*canonical : SerializeCreation\(speciesKey\)/,
+  'The mirrored saver must publish the same final body, including when the guest initiated completion');
 const applyRemoteAppearance = body(probe, 'void ApplyRemoteAppearance(', 'void UpdateRemoteCell(');
 const coopUpdate = body(probe, 'void CoopUpdate()', 'void Spawn()');
 const inviteUI = body(probe, 'void UpdateInviteUI(', 'void UpdatePeerIndicator(');
 const validateSavedWorld = body(probe, 'bool ValidateIncomingSavedWorld(', 'bool FindNewestSavedGame(');
 const sharedEditor = body(probe, 'void UpdateSharedEditor(', 'constexpr uint32_t kInviteButtonID');
+assert.match(sharedEditor,/gRemoteEditorFinish && gEditorAcceptRequested &&[\s\S]*gSavedEditorAppearance\.Remember\(snapshot,gAppliedSpeciesSequence,player->mModelKey\)/,
+  'Saved appearance alias requires confirmed remote completion of the applied final revision');
+assert.match(applyRemoteAppearance,/gSavedEditorAppearance\.Matches[\s\S]*gRemoteCreationKey=player->mModelKey;[\s\S]*return;/,
+  'Completed native appearance must be reused before creating or baking a foreign resource');
+const hostProxy=body(probe,'void UpdateHostAppearanceProxy(', 'void UpdateMirroredNpcs(');
+assert.match(hostProxy,/if \(gSavedEditorAppearance\.Matches\(snapshot,player->mModelKey\) \|\| sameAppearance\)/,
+  'Native completion proof must be rechecked each frame, not cached across editor sessions');
 assert.match(sharedEditor,/click\.ButtonClick\.commandID=button->GetCommandID\(\)[\s\S]*ui->HandleUIMessage\(button,click\)/,
   'Remote acceptance must reach EditorUI with the native command, not only the child window');
 assert.match(sharedEditor,/click\.eventType=UTFWin::kMsgComponentActivated/,
