@@ -221,7 +221,7 @@ namespace
 
     bool JoinSavedWorld();
     bool ValidateIncomingSavedWorld(const char* inviterRole);
-    void RemoveHostAppearanceProxy(const char* reason);
+    void RemoveHostAppearanceProxy(const char* reason, bool removeNativeCell = true);
     std::string SerializeCreation(const ResourceKey& key);
     bool DeserializeEditorResource(const std::string& blob,
         Editors::cEditorResource* resource);
@@ -717,10 +717,11 @@ namespace
             position, modelOverride) : -1;
     }
 
-    void RemoveRemoteCell(const char* reason)
+    void RemoveRemoteCell(const char* reason, bool removeNativeCell = true)
     {
         const auto removed = gRemoteCellIndex;
-        auto game = Simulator::Cell::cCellGame::Get();
+        auto game = removeNativeCell && Simulator::IsCellGame() && !Simulator::IsEditorMode()
+            ? Simulator::Cell::cCellGame::Get() : nullptr;
         if (game && CoopVisual::HasCellIndex(gRemoteCellIndex) &&
             game->mCells.GetIfNotDeleted(gRemoteCellIndex))
             DestroyCell(gRemoteCellIndex);
@@ -1072,10 +1073,11 @@ namespace
         remote->mTargetOpacity = remote->mOpacity;
     }
 
-    void RemoveHostAppearanceProxy(const char* reason)
+    void RemoveHostAppearanceProxy(const char* reason, bool removeNativeCell)
     {
-        auto game = Simulator::Cell::cCellGame::Get();
-        auto player = GetLocalPlayerCell();
+        auto game = removeNativeCell && Simulator::IsCellGame() && !Simulator::IsEditorMode()
+            ? Simulator::Cell::cCellGame::Get() : nullptr;
+        auto player = game ? GetLocalPlayerCell() : nullptr;
         if (player && gLocalPlayerHiddenByProxy && player->Index() == gHiddenPlayerIndex)
         {
             player->mOpacity = gSavedLocalOpacity;
@@ -1093,9 +1095,10 @@ namespace
     }
 
 
-    void RemoveMirroredNpcs(const char* reason)
+    void RemoveMirroredNpcs(const char* reason, bool removeNativeCell = true)
     {
-        auto game = Simulator::Cell::cCellGame::Get();
+        auto game = removeNativeCell && Simulator::IsCellGame() && !Simulator::IsEditorMode()
+            ? Simulator::Cell::cCellGame::Get() : nullptr;
         if (game)
             for (auto& item : gMirroredNpcs)
                 if (CoopVisual::HasCellIndex(item.second.cellIndex) &&
@@ -3232,12 +3235,14 @@ namespace
         }
         else
         {
+            // The mode switch can tear down cCellGame::mCells before its singleton
+            // disappears. Native cleanup here would dereference the old pool.
             if (CoopVisual::HasCellIndex(gRemoteCellIndex))
             {
-                RemoveRemoteCell("left cell gameplay or entered editor");
+                RemoveRemoteCell("left cell gameplay or entered editor", false);
             }
-            RemoveHostAppearanceProxy("Left cell gameplay; restored the native local appearance.");
-            RemoveMirroredNpcs("left cell gameplay or entered editor");
+            RemoveHostAppearanceProxy("Left cell gameplay; cleared local appearance proxy state.", false);
+            RemoveMirroredNpcs("left cell gameplay or entered editor", false);
         }
 
         // The host may seed the campaign before the guest accepts; all later
