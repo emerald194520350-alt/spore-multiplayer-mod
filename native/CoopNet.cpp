@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 6;
+    constexpr int kProtocol = 7;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -225,6 +225,7 @@ namespace
 
     void ClearRemotePeerStateLocked()
     {
+        gSnapshot.historyBlob.clear(); gSnapshot.historySequence=0;
         gSnapshot.remotePeerConnected = false;
         gSnapshot.hasRemotePosition = false;
         gSnapshot.remoteX = 0.0f;
@@ -426,6 +427,20 @@ namespace
             return;
         }
 
+        if (type == "history")
+        {
+            std::string role, blob;
+            double sequence=0, world=0;
+            if (!ReadString(json,"role",role) || !ReadString(json,"history",blob) || blob.size()>65536 ||
+                !ReadNumber(json,"sequence",sequence) || sequence<1 || sequence>9007199254740991.0 || std::floor(sequence)!=sequence ||
+                !ReadNumber(json,"worldGeneration",world)) return;
+            std::lock_guard<std::mutex> lock(gMutex);
+            if (!gSnapshot.inviteAccepted || role!=gSnapshot.inviteFrom || world!=double(gSnapshot.worldGeneration) ||
+                sequence<=double(gSnapshot.historySequence)) return;
+            gSnapshot.historySequence=static_cast<std::uint64_t>(sequence);
+            gSnapshot.historyBlob=std::move(blob);
+            return;
+        }
         if (type == "npcSnapshot")
         {
             std::string role;
@@ -571,6 +586,7 @@ namespace
             std::lock_guard<std::mutex> lock(gMutex);
             if (worldGeneration != gSnapshot.worldGeneration)
             {
+                gSnapshot.historySequence=0; gSnapshot.historyBlob.clear();
                 gSnapshot.remoteNpcs.clear(); gSnapshot.npcReceivedTick=0;
                 gSnapshot.npcSequence=0; gSnapshot.worldActionAck=0; gWorldActions.clear();
                 // The server resets species revisions on every accepted new
@@ -961,6 +977,12 @@ namespace CoopNet
     {
         Queue(std::string("{\"type\":\"hostPause\",\"paused\":") +
             (paused ? "true}" : "false}"));
+    }
+
+    void SubmitHistory(const std::string& blob, std::uint64_t sequence, std::uint64_t world)
+    {
+        Queue("{\"type\":\"history\",\"worldGeneration\":"+std::to_string(world)+
+            ",\"sequence\":"+std::to_string(sequence)+",\"history\":\""+JsonEscape(blob)+"\"}");
     }
 
     void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck)

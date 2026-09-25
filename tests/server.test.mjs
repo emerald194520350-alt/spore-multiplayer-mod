@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 6, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 7, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -187,6 +187,18 @@ try {
   const acceptedInvite = await host.wait(stateMessage(state.revision));
   check(state.inviteAccepted && acceptedInvite.inviteAccepted && !state.invitePending,
     'Accepted invitation unlocks automatic world joining');
+  const historyBytes=Buffer.alloc(140);
+  historyBytes.writeUInt32LE(0x31545348,0);historyBytes.writeUInt32LE(1,16);
+  const historyPacket={type:'history',worldGeneration:state.worldGeneration,sequence:1,history:historyBytes.toString('base64')};
+  const historyEcho=await host.request(historyPacket,m=>m.type==='history');
+  const historyAtGuest=await guest.wait(m=>m.type==='history');
+  check(historyEcho.history===historyPacket.history && historyAtGuest.history===historyPacket.history,
+    'Host timeline is relayed identically to both players');
+  await failure(guest,{...historyPacket,sequence:2},'World owner authority');
+  await failure(host,historyPacket,'Stale history');
+  await failure(host,{...historyPacket,sequence:2,worldGeneration:state.worldGeneration-1},'Stale world');
+  await failure(host,{...historyPacket,sequence:2,history:'bad'},'Invalid history');
+  await failure(host,{...historyPacket,sequence:2,history:historyBytes.subarray(0,24).toString('base64')},'Invalid history');
   const npcFrame = [
     0x80000001, 123456, 12, 34, 0, 0, 1, 0.55, 0.55, 1, 0, 0xfedcba98, 0x2b978c46, 0, 6, 0, 0, 0,
     0x80000002, 654321, 18, 35, 0, 0.7071067, 0.7071067, 0.8, 0.8, 1, 1, 789, 0x2b978c46, 0, 4, 0, 0, 0

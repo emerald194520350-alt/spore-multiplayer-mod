@@ -76,6 +76,22 @@ int main(int argc, char** argv)
             return 0;
         }
         Check(TestSharedWorld(),"Shared world coordinates, editor rebase and mission increments");
+        TestCampaignData();
+        Check(true,"World-save ownership and bounded native history data");
+        gRole="guest";gSnapshot=CoopNet::Snapshot{};
+        gSnapshot.connected=gSnapshot.inviteAccepted=true;
+        gSnapshot.worldGeneration=9;gSnapshot.inviteFrom="host";
+        HandleMessage(R"({"type":"history","role":"host","worldGeneration":9,"sequence":1,"history":"snapshot"})");
+        Check(gSnapshot.historySequence==1 && gSnapshot.historyBlob=="snapshot","History owner accepted atomically");
+        HandleMessage(R"({"type":"history","role":"guest","worldGeneration":9,"sequence":2,"history":"wrong-owner"})");
+        Check(gSnapshot.historySequence==1,"Guest cannot replace authoritative history");
+        HandleMessage(R"({"type":"history","role":"host","worldGeneration":8,"sequence":2,"history":"wrong-world"})");
+        Check(gSnapshot.historySequence==1,"Old campaign history rejected");
+        HandleMessage(R"({"type":"history","role":"host","worldGeneration":9,"sequence":1,"history":"stale"})");
+        Check(gSnapshot.historyBlob=="snapshot","Duplicate history does not overwrite latest data");
+        MarkDisconnected();
+        Check(gSnapshot.historyBlob.empty() && !gSnapshot.historySequence,"Disconnect clears remote history");
+        gSnapshot=CoopNet::Snapshot{};
         TestPeerIndicator();
         Check(true,"Off-screen indicator covers all edges, corners, aspect ratios and invalid inputs");
         {

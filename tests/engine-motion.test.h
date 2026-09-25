@@ -8,6 +8,7 @@
 #include "engine-replica.test.h"
 #include "peer-indicator.test.h"
 #include "engine-editor.test.h"
+#include "campaign.test.h"
 
 // Execute only the verified, self-contained movement routines against fixture
 // memory. DONT_RESOLVE_DLL_REFERENCES never calls the game's entry point.
@@ -103,5 +104,5 @@ inline int TestEngineMotion(const char* executable)
     move(cell.data(), &start);
     Vec result; std::memcpy(&result,cell.data()+0x4c,sizeof(result));
     require(closeEnough(result.x,100) && closeEnough(result.y,100), "Simple cell teleport failed"); ++checks;
-    return checks + TestEngineReplicaCollision(base) + TestPeerProjectionAgainstEngine(base) + TestEngineEditorDispatch(base);
+    return checks + TestEngineReplicaCollision(base) + TestPeerProjectionAgainstEngine(base) + TestEngineEditorDispatch(base) + TestCampaignAbi(base);
 }

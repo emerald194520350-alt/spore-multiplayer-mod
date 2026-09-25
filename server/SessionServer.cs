@@ -79,7 +79,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 6;
+        const int Protocol = 7;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -91,6 +91,7 @@ namespace SporeCoop
         int Connections;
         readonly Dictionary<uint, double[]> WorldObjects = new Dictionary<uint, double[]>();
         readonly HashSet<uint> RemovedObjects = new HashSet<uint>();
+        long HistorySequence;
 
         static JavaScriptSerializer NewJson()
         {
@@ -390,6 +391,28 @@ namespace SporeCoop
             string type = Text(data, "type", 32);
             if (type == "ping") { Send(peer, new { type = "pong" }); return; }
             if (type == "snapshot") { Send(peer, Snapshot()); return; }
+            if (type == "history")
+            {
+                if (!State.InviteAccepted || peer.Role != State.InviteFrom)
+                    throw new ArgumentException("World owner authority required");
+                if (Integer(data,"worldGeneration",0,long.MaxValue) != State.WorldGeneration)
+                    throw new ArgumentException("Stale world generation");
+                long sequence = Integer(data,"sequence",1,9007199254740991L);
+                if (sequence <= HistorySequence) throw new ArgumentException("Stale history sequence");
+                string blob = Text(data,"history",65536);
+                byte[] bytes;
+                try { bytes=Convert.FromBase64String(blob); }
+                catch (FormatException) { throw new ArgumentException("Invalid history"); }
+                // HST1: magic, source model key, count, then 30 DWORDs per event.
+                if (bytes.Length<20 || BitConverter.ToUInt32(bytes,0)!=0x31545348 ||
+                    BitConverter.ToUInt32(bytes,16)>320 ||
+                    bytes.Length!=20+120*(long)BitConverter.ToUInt32(bytes,16))
+                    throw new ArgumentException("Invalid history");
+                HistorySequence=sequence;
+                Broadcast(new { type="history", role=peer.Role, worldGeneration=State.WorldGeneration,
+                    sequence=sequence, history=blob });
+                return;
+            }
             if (type == "position")
             {
                 if (State.Evolving || !Peers.ContainsKey("host")) throw new ArgumentException("World paused");
@@ -558,6 +581,7 @@ namespace SporeCoop
                 State.InviteFrom = peer.Role;
                 ++State.WorldGeneration;
                 WorldObjects.Clear(); RemovedObjects.Clear();
+                HistorySequence=0;
                 State.HostPaused = false;
                 // A new invitation selects a new authoritative saved world.
                 // Its cell tutorial state must be seeded by that world's owner,

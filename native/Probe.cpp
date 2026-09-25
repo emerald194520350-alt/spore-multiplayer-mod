@@ -35,6 +35,8 @@
 #include "SaveCompatibility.h"
 #include "CoopUi.h"
 #include "PeerIndicator.h"
+#include "CampaignAbi.h"
+#include "HistoryData.h"
 #include <Spore/Simulator/Cell/cCellGFX.h>
 #include <Spore/Editors/BakeManager.h>
 #include <Spore/Editors/EditorUI.h>
@@ -587,6 +589,39 @@ namespace
         return true;
     }
 
+    eastl::intrusive_ptr<Editors::cCreatureDataResource> LoadCellCreature(const ResourceKey& source)
+    {
+        ResourceKey key=source;
+        Editors::cCreatureDataResource* loaded=nullptr;
+        Editors::cEditor::LoadCreatureData(&key,&loaded);
+        eastl::intrusive_ptr<Editors::cCreatureDataResource> result=loaded;
+        if (loaded) loaded->Release();
+        return result;
+    }
+
+    using ModelAttachmentsFunction=void(__cdecl*)(int*,void*,const ResourceKey*);
+    ModelAttachmentsFunction gModelAttachmentsOriginal=nullptr;
+    bool gModelAttachmentsHook=false;
+    void __cdecl ModelAttachmentsHook(int* count,void* attachments,const ResourceKey* key)
+    {
+        // The same null dereference also occurs in deferred native NPC loads,
+        // outside CreateCellFromResource. Guard the actual failing engine entry.
+        auto resource = key && key->typeID!=0x476A98C7 ? LoadCellCreature(*key) :
+            eastl::intrusive_ptr<Editors::cCreatureDataResource>{};
+        if (!key || (key->typeID!=0x476A98C7 && !resource))
+        {
+            if (count) *count=0; // Native empty-creature branch has this result.
+            static ULONG64 lastLog=0;
+            if (GetTickCount64()-lastLog>3000)
+            {
+                WriteProbeLog("Prevented native E83EC8 null creature load; missing model has no attachments.");
+                lastLog=GetTickCount64();
+            }
+            return;
+        }
+        gModelAttachmentsOriginal(count,attachments,key);
+    }
+
     Simulator::cObjectPoolIndex CreateCellFromResource(
         Simulator::Cell::cCellDataReference<Simulator::Cell::cCellCellResource>* reference,
         Simulator::Cell::CellStageScale stageScale,
@@ -637,13 +672,26 @@ namespace
 
         const auto originalAttachmentType = modelAttachment ? modelAttachment->type : AttachmentType::Creature;
         auto serializable = game->mpSerializableData.get();
+        // E83EC8 dereferences LoadCreatureData's result without checking it.
+        // A foreign numeric model ID does not imply that this profile has its
+        // baked creature. Keep the successful load alive throughout creation.
+        eastl::intrusive_ptr<Editors::cCreatureDataResource> creatureData;
+        const ResourceKey* requiredModel = modelOverride ? modelOverride :
+            (modelAttachment && originalAttachmentType == AttachmentType::PlayerCreature && serializable
+                ? &serializable->mPlayerCreatureKey : nullptr);
+        if (modelOverride && !serializable) return -1;
+        if (requiredModel && requiredModel->typeID != 0x476A98C7)
+        {
+            creatureData = LoadCellCreature(*requiredModel);
+            if (!creatureData || creatureData->mRigblocks.empty()) return -1;
+        }
         ResourceKey originalPlayerKey{};
         if (modelOverride && serializable)
         {
             originalPlayerKey = serializable->mPlayerCreatureKey;
             serializable->mPlayerCreatureKey = *modelOverride;
         }
-        if (modelAttachment) modelAttachment->type = AttachmentType::PlayerCreature;
+        if (modelAttachment && modelOverride) modelAttachment->type = AttachmentType::PlayerCreature;
         const auto avatarBefore = game->mAvatarCellIndex;
         const auto index = Simulator::Cell::CreateCellObject(game->mpCellQuery,
             position, 0.0f, reference, stageScale, 1.0f, 1.0f);
@@ -1271,8 +1319,9 @@ namespace
                 ? game->mCells.GetIfNotDeleted(mirror.cellIndex) : nullptr;
             if (!cell)
             {
-                if (CoopVisual::HasCellIndex(mirror.cellIndex) && now - mirror.createdAt < 1500)
+                if (mirror.createdAt && now - mirror.createdAt < 1500)
                     continue;
+                mirror.createdAt = now;
                 cCellCellResourcePtr reference =
                     Simulator::Cell::cCellDataReference<Simulator::Cell::cCellCellResource>::Create(
                         state.cellResource);
@@ -1656,6 +1705,9 @@ namespace
         const auto* start = reinterpret_cast<const unsigned char*>(&value);
         bytes.insert(bytes.end(), start, start + sizeof(T));
     }
+
+    #include "CampaignSync.h"
+    #include "HistorySync.h"
 
     std::string SerializeEditorResource(Editors::cEditorResource* resource)
     {
@@ -2956,6 +3008,13 @@ namespace
             root->AddWindow(window);
             gPeerArrow=window;
         }
+        // Evolution can replace the main UI tree while our intrusive pointer
+        // keeps the old indicator alive. Attach it to the current root again.
+        if (gPeerArrow->GetParent() != root)
+        {
+            if (auto parent = gPeerArrow->GetParent()) parent->RemoveWindow(gPeerArrow.get());
+            root->AddWindow(gPeerArrow.get());
+        }
         gPeerArrowDrawable->dx=arrow.dx; gPeerArrowDrawable->dy=arrow.dy;
         gPeerArrow->SetArea({arrow.x-24,arrow.y-24,arrow.x+24,arrow.y+24});
         gPeerArrow->SetFlag(UTFWin::kWinFlagVisible,true);
@@ -2966,6 +3025,7 @@ namespace
     void CoopUpdate()
     {
         const auto snapshot = LocalWorldSnapshot(CoopNet::GetSnapshot());
+        ObserveWorldSaveOwner(snapshot);
         UpdateSessionEndedUI(snapshot);
         UpdatePeerIndicator(snapshot);
         if (!snapshot.enabled || !snapshot.connected)
@@ -3188,6 +3248,7 @@ namespace
             UpdateSharedCellProgress(snapshot);
             gLastProgressTick = now;
         }
+        UpdateSharedHistory(snapshot,now);
     }
 
     void Spawn()
@@ -3379,7 +3440,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Protocol 6: verified world-growth coordinates and shared object interactions enabled."
+            ? "Protocol 7: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
@@ -3388,6 +3449,12 @@ namespace
             ? "Initialize completed; commands registered and cooperative client started."
             : "Initialize completed; commands registered; cooperative client disabled (no environment)."
         );
+        WriteProbeLog(gCampaignSaveHooks ? "Verified campaign save hooks: invited worlds cannot be saved locally."
+            : "Campaign save ABI unavailable: host-only save protection is disabled.");
+        WriteProbeLog(gModelAttachmentsHook ? "Verified E83EC8 model-load crash guard enabled."
+            : "Native model-load guard unavailable for this executable.");
+        WriteProbeLog(gTimelineHook ? "Verified native history recorder and timeline UI: owner history mirroring enabled."
+            : "Native history ABI unavailable: history mirroring is disabled.");
     }
 }
 
@@ -3396,6 +3463,13 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         PrepareDetours(module);
+        gModelAttachmentsOriginal=reinterpret_cast<ModelAttachmentsFunction>(VerifiedMotionCode(
+            CoopEngine::kModelAttachmentsRva,CoopEngine::kModelAttachmentsSize,
+            CoopEngine::kModelAttachmentsHash,CoopEngine::kModelAttachmentsRelocations));
+        if (gModelAttachmentsOriginal) gModelAttachmentsHook=DetourAttach(
+            reinterpret_cast<PVOID*>(&gModelAttachmentsOriginal),ModelAttachmentsHook)==NO_ERROR;
+        gCampaignSaveHooks = AttachCampaignSaveHooks();
+        gTimelineHook = AttachHistoryHook();
         if (GetCellMotionFunctions().Ready())
         {
             gCellGraphicsUpdateOriginal = reinterpret_cast<CellGraphicsUpdateFunction>(VerifiedMotionCode(
@@ -3427,12 +3501,20 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (gEditorUIMessageOriginal)
             gEditorUIHookAttached=DetourAttach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook)==NO_ERROR;
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        if (CommitDetours() != NO_ERROR) { gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
+        if (CommitDetours() != NO_ERROR) { gModelAttachmentsHook=false; gTimelineHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
         PrepareDetours(module);
+        if (gModelAttachmentsHook) DetourDetach(reinterpret_cast<PVOID*>(&gModelAttachmentsOriginal),ModelAttachmentsHook);
+        if (gTimelineHook) DetourDetach(reinterpret_cast<PVOID*>(&gTimelineShowOriginal),TimelineShowHook);
+        if (gCampaignSaveHooks)
+        {
+            DetourDetach(reinterpret_cast<PVOID*>(&gSaveWorldOriginal),SaveWorldHook);
+            DetourDetach(reinterpret_cast<PVOID*>(&gSavePrepareOriginal),SavePrepareHook);
+            DetourDetach(reinterpret_cast<PVOID*>(&gSaveCleanupOriginal),SaveCleanupHook);
+        }
         if (gCellGraphicsHookAttached)
             DetourDetach(reinterpret_cast<PVOID*>(&gCellGraphicsUpdateOriginal), CellGraphicsUpdateHook);
         if (gWorldRemovalHookAttached)

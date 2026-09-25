@@ -93,6 +93,8 @@ namespace CoopNet
         std::uint64_t npcReceivedTick = 0;
         std::vector<NpcState> remoteNpcs;
         std::uint64_t worldActionAck = 0;
+        std::uint64_t historySequence = 0;
+        std::string historyBlob;
 
         bool invitePending = false;
         bool inviteAccepted = false;
@@ -136,6 +138,7 @@ namespace CoopNet
     void SubmitInviteResponse(bool accepted);
     void SubmitHostPause(bool paused);
     void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck = 0);
+    void SubmitHistory(const std::string& blob, std::uint64_t sequence, std::uint64_t world);
     std::uint64_t SubmitWorldAction(WorldAction action);
     std::vector<WorldAction> TakeWorldActions();
     void SeedProgress(const CellProgress& progress);

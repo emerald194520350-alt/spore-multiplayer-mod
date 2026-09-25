@@ -8,6 +8,19 @@ namespace CoopSession
         return !snapshot.inviteFrom.empty() && snapshot.inviteFrom == role;
     }
 
+    // Losing TCP does not turn the invited campaign into a local save. Release
+    // this lease only after leaving that world, or selecting a new owner.
+    struct WorldSaveLease
+    {
+        bool blocked = false;
+        void Observe(const CoopNet::Snapshot& state, const char* role, bool leftWorld)
+        {
+            if (state.connected && state.inviteAccepted && !state.inviteFrom.empty())
+                blocked = !IsWorldOwner(state, role);
+            else if (leftWorld) blocked = false;
+        }
+    };
+
     inline bool ShouldMirrorPause(const CoopNet::Snapshot& snapshot,
         const char* role, bool inWorld)
     {
