@@ -23,6 +23,7 @@
 #include "ProgressSync.h"
 #include "CellEngineAbi.h"
 #include "CellMotionAbi.h"
+#include "CellBodyAbi.h"
 #include "CellReplicaAbi.h"
 #include "CellGrowthAbi.h"
 #include "CellProgressAbi.h"
@@ -1181,6 +1182,63 @@ namespace
             if (game->mCells.GetIfNotDeleted(index)) DestroyCell(index);
     }
 
+    bool ApplySharedPlayerBody(const CoopNet::Snapshot& snapshot,
+        Simulator::Cell::cCellObjectData* player)
+    {
+        if (!Simulator::IsCellGame() || snapshot.editorOpen || !snapshot.inviteAccepted ||
+            CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) || !player ||
+            player->field_112 || !CoopVisual::AppearanceMatchesPosition(snapshot) ||
+            !gRemoteCreationKey.instanceID) return false;
+        auto game = Simulator::Cell::cCellGame::Get();
+        auto data = game ? game->mpSerializableData.get() : nullptr;
+        if (!data || IsPartCinematic(game) || player->Index() != game->mAvatarCellIndex) return false;
+        if (SameResourceKey(player->mModelKey, gRemoteCreationKey))
+        {
+            data->mPlayerCreatureKey = player->mModelKey;
+            return true;
+        }
+        static void* releaseBody = VerifiedMotionCode(CoopEngine::kReleaseCellBodyRva,
+            CoopEngine::kReleaseCellBodySize, CoopEngine::kReleaseCellBodyHash,
+            CoopEngine::kReleaseCellBodyRelocations);
+        using BuildBody = void(__cdecl*)(int, int);
+        static auto buildBody = reinterpret_cast<BuildBody>(VerifiedMotionCode(
+            CoopEngine::kBuildCellBodyRva, CoopEngine::kBuildCellBodySize,
+            CoopEngine::kBuildCellBodyHash, CoopEngine::kBuildCellBodyRelocations));
+        if (!releaseBody || !buildBody || !GetCellMotionFunctions().Ready()) return false;
+        // Resolve and bake the complete shared creature before touching the live
+        // player. A visible proxy alone does not change native mouth abilities.
+        auto creature = LoadCellCreature(gRemoteCreationKey);
+        auto baker = Editors::IBakeManager::Get();
+        if (!creature || creature->mRigblocks.empty() || !baker ||
+            !baker->IsBaked(gRemoteCreationKey, false)) return false;
+        if (player->mGFXObjectIndex != 0)
+        {
+            auto gfx = Simulator::Cell::cCellGFX::Get();
+            auto visual = gfx && CoopVisual::HasCellIndex(player->mGFXObjectIndex)
+                ? gfx->mCellGFXObjects.GetIfNotDeleted(player->mGFXObjectIndex) : nullptr;
+            if (!visual || visual->mCellIndex != player->Index()) return false;
+        }
+        const auto oldKey = player->mModelKey;
+        const auto position = player->GetPosition();
+        const auto orientation = player->mTransform.GetRotation().ToQuaternion();
+        RemoveHostAppearanceProxy("Replacing the appearance proxy with the shared native player body.");
+        if (player->mGFXObjectIndex != 0)
+            CoopEngine::ReleaseCellBody(releaseBody, player->Index());
+        // Both keys matter: collision/eating reads the actual cell model, while
+        // player ability checks and the editor read the campaign creature key.
+        player->mModelKey = gRemoteCreationKey;
+        data->mPlayerCreatureKey = gRemoteCreationKey;
+        buildBody(player->Index(), 0);
+        MoveCellBody(player, position, orientation);
+        gLastSubmittedAppearanceKey = ResourceKey{};
+        gLocalAppearanceStableSince = GetTickCount64();
+        char line[256]{};
+        sprintf_s(line, "Shared player body: avatar=%d model=%08X->%08X gfx=%d; native mouth and body now use the shared creature.",
+            player->Index(), oldKey.instanceID, player->mModelKey.instanceID, player->mGFXObjectIndex);
+        WriteProbeLog(line);
+        return true;
+    }
+
     void UpdateHostAppearanceProxy(const CoopNet::Snapshot& snapshot,
         Simulator::Cell::cCellObjectData* player)
     {
@@ -1220,9 +1278,12 @@ namespace
         }
         if (gSavedEditorAppearance.Matches(snapshot,player->mModelKey) || sameAppearance)
         {
+            if (game->mpSerializableData)
+                game->mpSerializableData->mPlayerCreatureKey = player->mModelKey;
             RemoveHostAppearanceProxy("Local species already matches the world owner.");
             return;
         }
+        if (ApplySharedPlayerBody(snapshot, player)) return;
         auto proxy = CoopVisual::HasCellIndex(gHostAppearanceProxyIndex)
             ? game->mCells.GetIfNotDeleted(gHostAppearanceProxyIndex) : nullptr;
         if (proxy && gHostAppearanceProxyModel != gRemoteCreationKey.instanceID)
