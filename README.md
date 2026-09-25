@@ -1,8 +1,8 @@
-# spore multiplayer mod beta 10
+# spore multiplayer mod beta 11
 
 SporeCoop is an experimental local co-op mod for SPORE. It is designed to let two SPORE instances on the same PC share a game session, with a future LAN/Radmin VPN mode planned for remote players.
 
-The project is currently **Beta 10** (protocol 7), an experimental prerelease. This update fixes a crash when a network cell is removed during the transition from Cell gameplay to the editor. Beta 9's missing-model guard, bright yellow off-screen teammate arrow, shared History timeline and owner-only campaign saves remain included. Existing shared evolution, appearance, DNA, parts, quests, movement and eating-animation work is retained. Update both game DLLs; the bundled protocol-7 server is compatible with Beta 9, while Beta 1–8 use incompatible protocols. Automated checks pass; the editor transition, two-window gameplay, Save-and-Quit and timeline thumbnails still need an interactive retest. See [release notes](RELEASE_NOTES.md) for scope, validation and installation.
+The project is currently **Beta 11** (protocol 7), an experimental prerelease. This update guards the crash when a network cell is cleaned up during the transition from Cell gameplay to the editor, while still removing replicas when a peer enters the editor before the local world closes. Beta 9's missing-model guard, bright yellow off-screen teammate arrow, shared History timeline and owner-only campaign saves remain included. Existing shared evolution, appearance, DNA, parts, quests, movement and eating-animation work is retained. Update both game DLLs; the bundled protocol-7 server is compatible with Beta 9 and 10, while Beta 1–8 use incompatible protocols. Automated checks pass; the editor transition, two-window gameplay, Save-and-Quit and timeline thumbnails still need an interactive retest. See [release notes](RELEASE_NOTES.md) for scope, validation and installation.
 
 Beta 2 adds native articulated-body movement, growth-aware world coordinates,
 shared object interactions and NPC interpolation. Cell progress now invokes

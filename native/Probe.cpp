@@ -3236,13 +3236,15 @@ namespace
         else
         {
             // The mode switch can tear down cCellGame::mCells before its singleton
-            // disappears. Native cleanup here would dereference the old pool.
+            // disappears. Keep native cleanup only while this window is still
+            // running the cell stage (the peer can enter the editor first).
+            const bool cellWorldActive = Simulator::IsCellGame();
             if (CoopVisual::HasCellIndex(gRemoteCellIndex))
             {
-                RemoveRemoteCell("left cell gameplay or entered editor", false);
+                RemoveRemoteCell("left cell gameplay or entered editor", cellWorldActive);
             }
-            RemoveHostAppearanceProxy("Left cell gameplay; cleared local appearance proxy state.", false);
-            RemoveMirroredNpcs("left cell gameplay or entered editor", false);
+            RemoveHostAppearanceProxy("Left cell gameplay or editor transition; cleared appearance proxy state.", cellWorldActive);
+            RemoveMirroredNpcs("left cell gameplay or entered editor", cellWorldActive);
         }
 
         // The host may seed the campaign before the guest accepts; all later

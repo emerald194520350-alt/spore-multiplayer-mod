@@ -166,8 +166,8 @@ assert.match(net, /void ClearRemotePeerStateLocked\(\)[\s\S]*hasRemotePosition =
 assert.match(coopUpdate, /!snapshot\.hasRemotePosition[\s\S]*RemoveRemoteCell\("cooperative peer left"\)/,
   'A peer leaving the session must explicitly remove its frozen network clone');
 assert.match(coopUpdate,
-  /else\s*\{(?:\s*\/\/[^\n]*\n)*\s*if \(CoopVisual::HasCellIndex\(gRemoteCellIndex\)\)\s*\{\s*RemoveRemoteCell\("left cell gameplay or entered editor", false\);\s*\}\s*RemoveHostAppearanceProxy\([^\n]*, false\);\s*RemoveMirroredNpcs\([^\n]*, false\);/,
-  'Leaving cell gameplay must clear replica references without dereferencing the torn-down native cell pool');
+  /else\s*\{(?:\s*\/\/[^\n]*\n)*\s*const bool cellWorldActive = Simulator::IsCellGame\(\);\s*if \(CoopVisual::HasCellIndex\(gRemoteCellIndex\)\)\s*\{\s*RemoveRemoteCell\("left cell gameplay or entered editor", cellWorldActive\);\s*\}\s*RemoveHostAppearanceProxy\([^\n]*, cellWorldActive\);\s*RemoveMirroredNpcs\([^\n]*, cellWorldActive\);/,
+  'Native replicas must be removed while the local cell world is active and cleared without pool access after it is torn down');
 for (const reset of [
   'gProgressSeedSent = false',
   'gProgressSync.Reset()',
