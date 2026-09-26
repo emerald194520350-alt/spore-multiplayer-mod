@@ -7,24 +7,29 @@ SaveWorldFunction gSaveWorldOriginal = nullptr;
 SaveFilesFunction gSavePrepareOriginal = nullptr, gSaveCleanupOriginal = nullptr;
 bool gCampaignSaveHooks = false;
 CoopSession::WorldSaveLease gWorldSaveLease;
+CoopSession::WorldLifecycle gWorldLifecycle;
+bool gGuestExitInProgress=false;
 
 void ObserveWorldSaveOwner(const CoopNet::Snapshot& state)
 {
-    auto game = Simulator::Cell::cCellGame::Get();
-    const bool leftWorld = !Simulator::IsStageGameMode() && !Simulator::IsEditorMode() &&
-        !Simulator::IsLoadingGameMode() && (!game || !game->mpSerializableData);
+    // The Cell singleton can retain serializable data on the galaxy screen.
+    // Use the completed mode transition instead of probing a stale world pool.
+    const bool leftWorld = Simulator::GetGameModeID()==GameModeIDs::kGGEMode &&
+        !state.inviteAccepted && !gGuestExitInProgress;
     gWorldSaveLease.Observe(state, CoopNet::GetRole(), leftWorld);
 }
 
 bool BlockGuestWorldSave()
 {
     ObserveWorldSaveOwner(CoopNet::GetSnapshot());
-    return gWorldSaveLease.blocked;
+    return gGuestExitInProgress || gWorldSaveLease.blocked;
 }
 
 bool __fastcall SavePrepareHook(void* self, void*)
 {
-    return BlockGuestWorldSave() ? true : gSavePrepareOriginal(self);
+    if (!BlockGuestWorldSave()) return gSavePrepareOriginal(self);
+    WriteProbeLog("Guest campaign file preparation blocked: the world is saved by its owner.");
+    return true;
 }
 
 bool __fastcall SaveCleanupHook(void* self, void*)

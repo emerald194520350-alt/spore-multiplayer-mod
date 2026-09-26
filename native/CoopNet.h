@@ -139,6 +139,9 @@ namespace CoopNet
     void SubmitHostPause(bool paused);
     void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck = 0);
     void SubmitHistory(const std::string& blob, std::uint64_t sequence, std::uint64_t world);
+    void SubmitDietEvent(std::uint32_t eventID);
+    std::vector<std::uint32_t> TakeDietEvents(std::uint64_t appliedRevision);
+    void SubmitWorldLeave(std::uint64_t world);
     std::uint64_t SubmitWorldAction(WorldAction action);
     std::vector<WorldAction> TakeWorldActions();
     void SeedProgress(const CellProgress& progress);

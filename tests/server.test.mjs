@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 7, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 8, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -339,6 +339,7 @@ try {
   state = await host.request({ type: 'editorOpen', editorBudget:16, editorId: 54321 }, stateMessage(state.revision + 1));
   await guest.wait(stateMessage(state.revision));
   check(!state.editorFinished && state.editorSession>firstEditorSession, 'New editor visits clear the old completion');
+  check(state.speciesName===sharedName, 'Unnamed native entry preserves the name from the previous evolution');
   host.send({type:'editorClose',editorSession:firstEditorSession,editorFinished:true,editorBudget:6,species:finalLiveSpecies});
   const stillOpen=await host.request({type:'snapshot'},m=>m.type==='state' && m.editorSession===state.editorSession);
   check(stillOpen.evolving && stillOpen.species==='', 'Late completion from the previous visit cannot close a new editor');
@@ -486,6 +487,24 @@ try {
   const afterRejected = await connected.host.request({ type: 'snapshot' }, m => m.type === 'state');
   check(afterRejected.food === 11 && afterRejected.unlocks[8] === 0 && afterRejected.hostProgressSequence === 1,
     'Rejected progress changes neither inventory nor acknowledgements');
+  // Contributions route to the actual world owner, including reversed roles.
+  const diet={type:'dietEvent',worldGeneration:state.worldGeneration,sequence:1,eventID:0x9ef61113};
+  connected.host.send(diet);
+  const plantEvent=await connected.guest.wait(m=>m.type==='dietEvent');
+  check(plantEvent.eventID===0x9ef61113 && plantEvent.role==='host', 'Invited player plant pickup reaches owner history');
+  connected.host.send({...diet,sequence:2,eventID:0xac7161b5});
+  check((await connected.guest.wait(m=>m.type==='dietEvent')).eventID===0xac7161b5,'Meat pickup retains its distinct history type');
+  await failure(connected.host,diet,'Stale diet');
+  await failure(connected.host,{...diet,sequence:3,worldGeneration:state.worldGeneration-1},'world generation');
+  await failure(connected.host,{...diet,sequence:3,eventID:123},'diet event');
+  await failure(connected.guest,{...diet,sequence:3},'Invited player');
+  await failure(connected.host,{type:'worldLeave',worldGeneration:state.worldGeneration},'World owner');
+  await failure(connected.guest,{type:'worldLeave',worldGeneration:state.worldGeneration-1},'world generation');
+  connected.guest.send({type:'worldLeave',worldGeneration:state.worldGeneration});
+  check((await connected.host.wait(m=>m.type==='sessionEnded')).reason==='host_left', 'Owner return to menu ends the invited game without TCP exit');
+  check((await connected.guest.wait(m=>m.type==='sessionEnded')).reason==='host_left', 'Owner also stops the completed session');
+  const ended=await connected.guest.wait(m=>m.type==='state' && !m.inviteAccepted);
+  check(!ended.evolving && !ended.hostPaused && !ended.inviteFrom,'World exit releases shared editor and pause');
   console.log('PASS: ' + checks + ' protocol assertions. No gameplay was tested. Artifacts: ' + temp);
 } catch (error) {
   console.error('Failed after ' + checks + ' assertions. Server log:\n' + logs);

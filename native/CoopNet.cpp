@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 7;
+    constexpr int kProtocol = 8;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -42,6 +42,9 @@ namespace
     std::uint64_t gNpcSequence = 0;
     std::uint64_t gWorldActionSequence = 0;
     std::vector<CoopNet::WorldAction> gWorldActions;
+    struct DietEvent { std::uint32_t id; std::uint64_t revision; };
+    std::vector<DietEvent> gDietEvents;
+    std::uint64_t gDietSequence = 0, gReceivedDietSequence = 0;
 
     std::string Environment(const char* name)
     {
@@ -252,6 +255,7 @@ namespace
         gSnapshot.remoteNpcs.clear();
         gSnapshot.worldActionAck = 0;
         gWorldActions.clear();
+        gDietEvents.clear(); gReceivedDietSequence=0;
     }
 
     bool ReadNumberArray(const std::string& json, const char* key,
@@ -301,6 +305,25 @@ namespace
             gSnapshot.sessionEnded = true;
             gSnapshot.disconnectReason = reason;
             gSnapshot.connected = false;
+            return;
+        }
+
+        if (type == "dietEvent")
+        {
+            std::string role;
+            double world=0, sequence=0, eventID=0, revision=0;
+            if (!ReadString(json,"role",role) || role==gRole ||
+                !ReadNumber(json,"worldGeneration",world) || !ReadNumber(json,"sequence",sequence) ||
+                !ReadNumber(json,"eventID",eventID) || !ReadNumber(json,"revision",revision) ||
+                revision<0 || revision>=9223372036854775808.0 || std::floor(revision)!=revision ||
+                sequence<1 || sequence>=9223372036854775808.0 ||
+                std::floor(sequence)!=sequence || (eventID!=0x9ef61113u && eventID!=0xac7161b5u)) return;
+            std::lock_guard<std::mutex> lock(gMutex);
+            if (!gSnapshot.connected || !gSnapshot.inviteAccepted || gSnapshot.inviteFrom!=gRole ||
+                world!=double(gSnapshot.worldGeneration) || sequence<=double(gReceivedDietSequence) ||
+                gDietEvents.size()>=4096) return;
+            gReceivedDietSequence=std::uint64_t(sequence);
+            gDietEvents.push_back({std::uint32_t(eventID),std::uint64_t(revision)});
             return;
         }
 
@@ -589,6 +612,7 @@ namespace
                 gSnapshot.historySequence=0; gSnapshot.historyBlob.clear();
                 gSnapshot.remoteNpcs.clear(); gSnapshot.npcReceivedTick=0;
                 gSnapshot.npcSequence=0; gSnapshot.worldActionAck=0; gWorldActions.clear();
+                gDietEvents.clear(); gReceivedDietSequence=0;
                 // The server resets species revisions on every accepted new
                 // invitation. A previous campaign's larger revision must not
                 // reject the new entry body or cause endless base conflicts.
@@ -983,6 +1007,30 @@ namespace CoopNet
     {
         Queue("{\"type\":\"history\",\"worldGeneration\":"+std::to_string(world)+
             ",\"sequence\":"+std::to_string(sequence)+",\"history\":\""+JsonEscape(blob)+"\"}");
+    }
+
+    void SubmitDietEvent(std::uint32_t eventID)
+    {
+        const auto state=GetSnapshot();
+        if (!state.connected || !state.inviteAccepted || state.inviteFrom==gRole) return;
+        Queue("{\"type\":\"dietEvent\",\"worldGeneration\":"+std::to_string(state.worldGeneration)+
+            ",\"sequence\":"+std::to_string(++gDietSequence)+",\"eventID\":"+std::to_string(eventID)+"}");
+    }
+
+    std::vector<std::uint32_t> TakeDietEvents(std::uint64_t appliedRevision)
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        std::vector<std::uint32_t> result;
+        auto it=gDietEvents.begin();
+        while (it!=gDietEvents.end() && it->revision<=appliedRevision)
+        { result.push_back(it->id); ++it; }
+        gDietEvents.erase(gDietEvents.begin(),it);
+        return result;
+    }
+
+    void SubmitWorldLeave(std::uint64_t world)
+    {
+        Queue("{\"type\":\"worldLeave\",\"worldGeneration\":"+std::to_string(world)+"}");
     }
 
     void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck)

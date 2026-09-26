@@ -27,6 +27,23 @@ inline void TestCampaignData()
     lease.Observe(state,"host",false);
     require(lease.blocked,"Protection is armed on acceptance before loading the invited world");
 
+    CoopSession::WorldLifecycle lifecycle;
+    state.worldGeneration=12; state.connectionGeneration=3; state.sessionEnded=false;
+    lifecycle.Observe(state,"host",true);
+    require(lifecycle.guest && !lifecycle.ShouldAnnounceExit(state,true),"Invited player cannot announce owner exit");
+    state.connected=state.inviteAccepted=false; state.inviteFrom.clear(); state.sessionEnded=true;
+    lifecycle.Observe(state,"host",true);
+    require(lifecycle.exitPending,"Guest remembers its role after EOF clears network state");
+    state.connected=state.inviteAccepted=true; state.inviteFrom="host"; state.sessionEnded=false;
+    state.worldGeneration=13;
+    lifecycle.Observe(state,"host",false);
+    require(!lifecycle.exitPending && !lifecycle.ShouldAnnounceExit(state,true),"Fresh invitation in menu must not end before loading");
+    lifecycle.Observe(state,"host",true);
+    require(!lifecycle.ShouldAnnounceExit(state,false),"Editor/loading are not a world exit");
+    require(lifecycle.ShouldAnnounceExit(state,true),"Owner return to galaxy menu ends the session");
+    lifecycle.leaveSent=true;
+    require(!lifecycle.ShouldAnnounceExit(state,true),"World leave is submitted once");
+
     CoopHistory::Snapshot history, decoded;
     history.model={12,34,56}; history.events.resize(2);
     history.events[0][3]=0x3e2a3040; history.events[1][5]=3600;

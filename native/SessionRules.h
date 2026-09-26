@@ -21,6 +21,30 @@ namespace CoopSession
         }
     };
 
+    // Keep the participant role after networking clears the invitation on EOF.
+    // Editor and loading transitions are part of the same campaign, not exits.
+    struct WorldLifecycle
+    {
+        std::uint64_t world=0, connection=0;
+        bool guest=false, ownerInWorld=false, leaveSent=false, exitPending=false;
+        void Observe(const CoopNet::Snapshot& state,const char* role,bool inWorld)
+        {
+            if (state.connected && state.inviteAccepted)
+            {
+                if (world!=state.worldGeneration || connection!=state.connectionGeneration)
+                {
+                    *this=WorldLifecycle{};
+                    world=state.worldGeneration; connection=state.connectionGeneration;
+                }
+                guest=!IsWorldOwner(state,role);
+                if (!guest && inWorld) ownerInWorld=true;
+            }
+            if (guest && state.sessionEnded) exitPending=true;
+        }
+        bool ShouldAnnounceExit(const CoopNet::Snapshot& state,bool inMenu) const
+        { return state.connected && state.inviteAccepted && ownerInWorld && !guest && !leaveSent && inMenu; }
+    };
+
     inline bool ShouldMirrorPause(const CoopNet::Snapshot& snapshot,
         const char* role, bool inWorld)
     {

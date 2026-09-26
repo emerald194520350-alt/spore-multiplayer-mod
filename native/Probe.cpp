@@ -812,7 +812,9 @@ namespace
             // This updates articulated body size, global scale and camera in
             // exactly the same path as a local pickup. A save-field assignment
             // alone leaves the guest avatar at its previous physical size.
-            native.addFood(gainedFood, false);
+            const int plants = std::clamp(value.plantFood - data->mPlantFoodProgression, 0, gainedFood);
+            if (plants) native.addFood(plants, true);
+            if (gainedFood > plants) native.addFood(gainedFood - plants, false);
             char line[160]{};
             sprintf_s(line,"Shared native growth: food=%d->%d scale=%.4f",oldFood,data->mFoodProgression,game->field_514C);
             WriteProbeLog(line);
@@ -1167,6 +1169,10 @@ namespace
         if (!game || !player) return;
         std::set<Simulator::cObjectPoolIndex> retained;
         retained.insert(player->Index());
+        // E761FC stores the native call-mate spawn here; E75C30 uses it for
+        // approach/mating. Deleting this actor breaks the guest's call button.
+        if (CoopVisual::HasCellIndex(game->field_51D4)) retained.insert(game->field_51D4);
+        if (CoopVisual::HasCellIndex(game->field_516C)) retained.insert(game->field_516C);
         if (CoopVisual::HasCellIndex(gRemoteCellIndex)) retained.insert(gRemoteCellIndex);
         if (CoopVisual::HasCellIndex(gHostAppearanceProxyIndex))
             retained.insert(gHostAppearanceProxyIndex);
@@ -1872,8 +1878,9 @@ namespace
         const char16_t* name=editor->GetName();
         // NamePanel commits its text on blur. Include text still being edited.
         auto panel=editor->mpEditorNamePanel.get();
-        if (panel && panel->mpLayout)
-            if (auto field=panel->mpLayout->FindWindowByID(0xC7CEB1BD)) name=field->GetCaption();
+        if (panel && panel->field_10 && panel->mpLayout)
+            if (auto field=panel->mpLayout->FindWindowByID(0xC7CEB1BD))
+                if (field->IsVisible()) name=field->GetCaption();
         size_t count=0; if (name) while (name[count] && count<512) ++count;
         const auto bytes=reinterpret_cast<const unsigned char*>(name);
         return count ? Base64Encode(std::vector<unsigned char>(bytes,bytes+count*2)) : std::string{};
@@ -1922,6 +1929,8 @@ namespace
             {
                 gEditorAcceptRequested=command==0x102;
                 gLastEditorName=ReadEditorName();
+                // Flush an in-focus name before native validation/save.
+                if (gEditorAcceptRequested) ApplyEditorName(gLastEditorName);
                 gLastEditorBudget=CommittedEditorBudget();
             }
         }
@@ -2082,7 +2091,7 @@ namespace
             gEditorHistoryPending = false;
         }
         if (editorActive && snapshot.editorOpen) gSharedEditorSession=snapshot.editorSession;
-        if (editorReady)
+        if (editorReady && !gEditorAcceptRequested)
         {
             gLastEditorBudget = CommittedEditorBudget();
             gLastEditorName=ReadEditorName();
@@ -2113,6 +2122,9 @@ namespace
         if (editorActive && !gWasEditorMode)
         {
             gRemoteEditorFinish=false; gEditorAcceptRequested=false;
+            // Body snapshots omit metadata. Restore the shared name before
+            // publishing the initial revision of the next editor visit.
+            if (!snapshot.speciesName.empty()) ApplyEditorName(snapshot.speciesName);
             gLastLocalName=ReadEditorName();
             gLastLocalSpecies=SerializeEditorModel();
             gLastLocalBudget=CommittedEditorBudget();
@@ -3086,10 +3098,49 @@ namespace
         root->BringToFront(gPeerArrow.get());
     }
 
+    bool UpdateWorldLifecycle(const CoopNet::Snapshot& state)
+    {
+        const auto mode=Simulator::GetGameModeID();
+        const bool inMenu=mode==GameModeIDs::kGGEMode;
+        if (inMenu) gGuestExitInProgress=false;
+        gWorldLifecycle.Observe(state,CoopNet::GetRole(),
+            Simulator::IsStageGameMode() || Simulator::IsEditorMode());
+        if (gWorldLifecycle.ShouldAnnounceExit(state,inMenu))
+        {
+            CoopNet::SubmitWorldLeave(state.worldGeneration);
+            gWorldLifecycle.leaveSent=true;
+            WriteProbeLog("World owner returned to the galaxy menu; ending the cooperative session.");
+        }
+        if (!gWorldLifecycle.exitPending) return false;
+        if (inMenu)
+        {
+            gWorldLifecycle.exitPending=false;
+            gWorldLifecycle.guest=false;
+            return false;
+        }
+        if (Simulator::IsLoadingGameMode()) return true; // Finish native load before unloading it.
+        ReleaseCoopPause();
+        HideCoopUI();
+        RemoveRemoteCell("world owner left");
+        RemoveHostAppearanceProxy("World owner left.");
+        RemoveMirroredNpcs("world owner left");
+        // The normal game-mode manager invokes OnExit and the campaign cleanup.
+        // The guest save lease stays armed until this transition has completed.
+        gGuestExitInProgress=true;
+        if (GameModeManager.SetActiveMode(GameModeIDs::kGGEMode))
+        {
+            gWorldLifecycle.exitPending=false;
+            gWorldLifecycle.guest=false;
+            WriteProbeLog("Guest returned to the galaxy menu after the world owner left; no campaign save requested.");
+        }
+        return true;
+    }
+
     void CoopUpdate()
     {
         const auto snapshot = LocalWorldSnapshot(CoopNet::GetSnapshot());
         ObserveWorldSaveOwner(snapshot);
+        if (UpdateWorldLifecycle(snapshot)) return;
         UpdateSessionEndedUI(snapshot);
         UpdatePeerIndicator(snapshot);
         if (!snapshot.enabled || !snapshot.connected)
@@ -3508,7 +3559,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Protocol 7: verified world-growth coordinates and shared object interactions enabled."
+            ? "Protocol 8: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
@@ -3523,6 +3574,8 @@ namespace
             : "Native model-load guard unavailable for this executable.");
         WriteProbeLog(gTimelineHook ? "Verified native history recorder and timeline UI: owner history mirroring enabled."
             : "Native history ABI unavailable: history mirroring is disabled.");
+        WriteProbeLog(gDietHistoryHook ? "Verified native food events: guest diet contributes to the owner's history."
+            : "Native food history relay unavailable.");
     }
 }
 
@@ -3538,6 +3591,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             reinterpret_cast<PVOID*>(&gModelAttachmentsOriginal),ModelAttachmentsHook)==NO_ERROR;
         gCampaignSaveHooks = AttachCampaignSaveHooks();
         gTimelineHook = AttachHistoryHook();
+        gDietHistoryHook = AttachDietHistoryHook();
         if (GetCellMotionFunctions().Ready())
         {
             gCellGraphicsUpdateOriginal = reinterpret_cast<CellGraphicsUpdateFunction>(VerifiedMotionCode(
@@ -3569,7 +3623,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (gEditorUIMessageOriginal)
             gEditorUIHookAttached=DetourAttach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook)==NO_ERROR;
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        if (CommitDetours() != NO_ERROR) { gModelAttachmentsHook=false; gTimelineHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
+        if (CommitDetours() != NO_ERROR) { gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
@@ -3583,6 +3637,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             DetourDetach(reinterpret_cast<PVOID*>(&gSavePrepareOriginal),SavePrepareHook);
             DetourDetach(reinterpret_cast<PVOID*>(&gSaveCleanupOriginal),SaveCleanupHook);
         }
+        if (gDietHistoryHook) DetourDetach(reinterpret_cast<PVOID*>(&gHistoryEventOriginal),HistoryEventHook);
         if (gCellGraphicsHookAttached)
             DetourDetach(reinterpret_cast<PVOID*>(&gCellGraphicsUpdateOriginal), CellGraphicsUpdateHook);
         if (gWorldRemovalHookAttached)

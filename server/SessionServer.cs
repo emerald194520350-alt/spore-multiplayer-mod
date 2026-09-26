@@ -25,6 +25,7 @@ namespace SporeCoop
         public long AppearanceModelInstance, AppearanceModelType, AppearanceModelGroup;
         public long NpcSequence = -1;
         public long WorldActionSequence;
+        public long DietSequence;
         public readonly object SendLock = new object();
     }
 
@@ -79,7 +80,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 7;
+        const int Protocol = 8;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -690,6 +691,40 @@ namespace SporeCoop
                 Changed();
                 return;
             }
+            if (type == "dietEvent")
+            {
+                if (!State.InviteAccepted || peer.Role == State.InviteFrom)
+                    throw new ArgumentException("Invited player authority required");
+                if (Integer(data,"worldGeneration",1,long.MaxValue)!=State.WorldGeneration)
+                    throw new ArgumentException("Wrong world generation");
+                long sequence=Integer(data,"sequence",1,long.MaxValue);
+                long eventID=Integer(data,"eventID",0,uint.MaxValue);
+                if (eventID!=0x9ef61113L && eventID!=0xac7161b5L)
+                    throw new ArgumentException("Invalid diet event");
+                if (sequence<=peer.DietSequence) throw new ArgumentException("Stale diet sequence");
+                peer.DietSequence=sequence;
+                Peer owner;
+                if (Peers.TryGetValue(State.InviteFrom,out owner))
+                    Send(owner,new { type="dietEvent",role=peer.Role,worldGeneration=State.WorldGeneration,
+                        sequence=sequence,eventID=eventID,revision=State.Revision });
+                return;
+            }
+            if (type == "worldLeave")
+            {
+                if (!State.InviteAccepted || peer.Role!=State.InviteFrom)
+                    throw new ArgumentException("World owner authority required");
+                if (Integer(data,"worldGeneration",1,long.MaxValue)!=State.WorldGeneration)
+                    throw new ArgumentException("Wrong world generation");
+                State.Evolving=false; State.Editor=null; State.EditorID=0;
+                State.InvitePending=false; State.InviteAccepted=false; State.InviteFrom=null;
+                State.HostPaused=false;
+                Ready.Clear(); Pending=null;
+                // Returning to the galaxy menu ends the same session as closing
+                // the owner process. Notify both clients before clearing sockets.
+                Broadcast(new { type="sessionEnded",reason="host_left" });
+                Changed();
+                return;
+            }
             if (type == "editorOpen")
             {
                 if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
@@ -705,7 +740,10 @@ namespace SporeCoop
                     State.Editor = peer.Role;
                     State.EditorID = editorId;
                     State.Species=initial; ++State.SpeciesSequence;
-                    State.EditorBudget=budget; State.SpeciesName=name;
+                    State.EditorBudget=budget;
+                    // The next native editor can start with an unnamed cached
+                    // model. Empty entry metadata must not erase the saved name.
+                    if (!String.IsNullOrEmpty(name)) State.SpeciesName=name;
                     Ready.Clear();
                     Pending = null;
                     Changed();
@@ -1002,8 +1040,7 @@ namespace SporeCoop
                     peer.Client.Close();
                     if (peer.Role != null && Peers.ContainsKey(peer.Role) && Peers[peer.Role] == peer)
                     {
-                        bool ownerLeft = peer.Role == "host" ||
-                            (State.InviteAccepted && State.InviteFrom == peer.Role);
+                        bool ownerLeft = State.InviteAccepted ? State.InviteFrom == peer.Role : peer.Role == "host";
                         Peers.Remove(peer.Role);
                         State.Evolving = false;
                         State.Editor = null;

@@ -4,9 +4,36 @@
 using TimelineShowFunction = void(__thiscall*)(void*,bool);
 TimelineShowFunction gTimelineShowOriginal=nullptr;
 bool gTimelineHook=false, gTimelineVisible=false;
+using HistoryEventFunction = void*(__cdecl*)(unsigned,const ResourceKey*,const ResourceKey*,const ResourceKey*,const ResourceKey*);
+HistoryEventFunction gHistoryEventOriginal=nullptr;
+bool gDietHistoryHook=false;
 std::uint64_t gHistoryWorld=0, gHistoryConnection=0, gHistorySequence=0, gHistoryTick=0;
 std::string gHistorySent;
 std::map<CoopHistory::Key,CoopHistory::Key> gHistoryModels;
+
+void* __cdecl HistoryEventHook(unsigned eventID,const ResourceKey* a,const ResourceKey* b,
+    const ResourceKey* c,const ResourceKey* d)
+{
+    auto result=gHistoryEventOriginal(eventID,a,b,c,d);
+    // E7D2F9 = plant pickup; E7D343 = meat pickup. AddFood itself only
+    // updates counters/growth: replaying progress never records these events.
+    if (Simulator::IsCellGame() && (eventID==0x9ef61113u || eventID==0xac7161b5u))
+    {
+        const auto state=CoopNet::GetSnapshot();
+        if (state.connected && state.inviteAccepted && gProgressSync.IsInitialized() &&
+            !CoopSession::IsWorldOwner(state,CoopNet::GetRole()))
+        {
+            // Queue the earned counters before their history event. Capture is
+            // read-only for the engine; do not replay growth inside this hook.
+            CoopProgress::Event gain;
+            const auto current=ReadCellProgress();
+            if (gProgressSync.Capture(current,gain,false))
+                CoopNet::SubmitProgressDelta(gain.sequence,gain.delta,current.unlocks);
+            CoopNet::SubmitDietEvent(eventID);
+        }
+    }
+    return result;
+}
 
 bool ReadableHistoryMemory(const void* ptr,size_t size)
 {
@@ -118,6 +145,19 @@ void UpdateSharedHistory(const CoopNet::Snapshot& state,std::uint64_t now)
     gHistoryTick=now;
     if (CoopSession::IsWorldOwner(state,CoopNet::GetRole()))
     {
+        if (gDietHistoryHook)
+        {
+            // Event coordinates are calculated from the current shared diet.
+            // A network event can arrive between the regular 200 ms updates.
+            UpdateSharedCellProgress(state);
+            auto game=Simulator::Cell::cCellGame::Get();
+            if (game && game->mpSerializableData)
+            {
+                const ResourceKey empty{};
+                for (auto eventID:CoopNet::TakeDietEvents(state.revision))
+                    gHistoryEventOriginal(eventID,&game->mpSerializableData->mPlayerCreatureKey,&empty,&empty,&empty);
+            }
+        }
         CoopHistory::Snapshot history;
         if (!CaptureHistory(history)) return;
         auto bytes=CoopHistory::Encode(history);
@@ -136,4 +176,13 @@ bool AttachHistoryHook()
     gTimelineShowOriginal=reinterpret_cast<TimelineShowFunction>(VerifiedMotionCode(
         kTimelineShowRva,kTimelineShowSize,kTimelineShowHash,kTimelineShowRelocations));
     return gTimelineShowOriginal && DetourAttach(reinterpret_cast<PVOID*>(&gTimelineShowOriginal),TimelineShowHook)==NO_ERROR;
+}
+
+bool AttachDietHistoryHook()
+{
+    using namespace CoopEngine;
+    gHistoryEventOriginal=reinterpret_cast<HistoryEventFunction>(VerifiedMotionCode(
+        kHistoryEventRva,kHistoryEventSize,kHistoryEventHash,kHistoryEventRelocations));
+    return gHistoryEventOriginal &&
+        DetourAttach(reinterpret_cast<PVOID*>(&gHistoryEventOriginal),HistoryEventHook)==NO_ERROR;
 }
