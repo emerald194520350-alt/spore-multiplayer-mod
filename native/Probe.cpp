@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <intrin.h>
 #include <cstdio>
 #include <algorithm>
 #include <array>
@@ -24,6 +25,7 @@
 #include "CellEngineAbi.h"
 #include "CellMotionAbi.h"
 #include "CellBodyAbi.h"
+#include "CellLifecycleAbi.h"
 #include "CellReplicaAbi.h"
 #include "CellGrowthAbi.h"
 #include "CellProgressAbi.h"
@@ -46,6 +48,7 @@
 namespace
 {
     void WriteProbeLog(const char* message);
+    std::string CampaignSpeciesName();
     using CellGraphicsUpdateFunction = void(__cdecl*)();
     CellGraphicsUpdateFunction gCellGraphicsUpdateOriginal = nullptr;
     bool gCellGraphicsHookAttached = false;
@@ -213,6 +216,7 @@ namespace
         int appliedHealth = 6;
         std::vector<std::pair<std::uint64_t,int>> pendingDamage;
         std::uint64_t pendingRemoval = 0;
+        bool deathSubmitted = false;
         std::uint64_t appliedAnimationSequence = 0;
         CoopWorld::NpcMotion motion;
     };
@@ -475,6 +479,37 @@ namespace
     }
 
     RemoveCellFunction gWorldRemoveOriginal = nullptr;
+    using KillCellFunction=bool(__cdecl*)(Simulator::Cell::cCellObjectData*,int,void*,bool,bool,float);
+    KillCellFunction gKillCellOriginal=nullptr;
+    bool gKillCellHook=false;
+
+    bool __cdecl KillCellHook(Simulator::Cell::cCellObjectData* cell,int attacker,void* resource,
+        bool credit,bool extra,float delta)
+    {
+        const auto state=CoopNet::GetSnapshot();
+        if (cell && cell->mCellResource && state.connected && state.inviteAccepted && !state.editorOpen &&
+            !CoopSession::IsWorldOwner(state,CoopNet::GetRole()))
+            for (auto& item:gMirroredNpcs) if (item.second.cellIndex==cell->Index()) {
+                auto& mirror=item.second;
+                if (!mirror.deathSubmitted && !cell->field_113 && !cell->field_112) {
+                    CoopNet::WorldAction action; action.id=item.first;
+                    action.resource=cell->mCellResource->mInstanceID;
+                    action.damage=1000000; // A lethal hit, replayed through native death by the owner.
+                    const auto seq=CoopNet::SubmitWorldAction(action);
+                    mirror.pendingDamage.emplace_back(seq,action.damage);
+                    mirror.deathSubmitted=true;
+                    auto game=Simulator::Cell::cCellGame::Get();
+                    if (credit && game && game->mpSerializableData) ++game->mpSerializableData->mKillCount;
+                    WriteProbeLog("Guest NPC death submitted to owner for native loot.");
+                }
+                // The owner creates loot once. Its death state/animation then
+                // reaches this replica, without transient guest-only pickups.
+                cell->mHealthPoints=0;
+                cell->field_113=true;
+                return true;
+            }
+        return gKillCellOriginal(cell,attacker,resource,credit,extra,delta);
+    }
 
     bool IsPartCinematic(Simulator::Cell::cCellGame* game)
     {
@@ -502,6 +537,7 @@ namespace
                 const float radius=std::max(2.0f,(cell->mTransform.GetScale()+player->mTransform.GetScale())*4);
                 const bool pickup=data && (data->eat.foodValue>0 || static_cast<int>(data->unlockType)!=0) &&
                     (p.x-a.x)*(p.x-a.x)+(p.y-a.y)*(p.y-a.y)<=radius*radius;
+                if (mirror.deathSubmitted) { effects=false; break; }
                 if (effects || cell->mHealthPoints<=0 || pickup)
                 {
                     CoopNet::WorldAction action; action.id=entry.first;
@@ -529,8 +565,18 @@ namespace
             if (cell && cell->Index()!=game->mAvatarCellIndex && cell->Index()!=gRemoteCellIndex &&
                 cell->mCellResource && cell->mCellResource->mInstanceID==action.resource)
             {
-                if (action.removed) gWorldRemoveOriginal(cell->Index(),action.effects,cell->mTransform.GetScale(),false);
-                else if (action.damage) cell->mHealthPoints=std::max(0,cell->mHealthPoints-action.damage);
+                if (action.damage && !cell->field_112 && !cell->field_113) {
+                    cell->mHealthPoints=std::max(0,cell->mHealthPoints-action.damage);
+                    if (!cell->mHealthPoints && gKillCellOriginal) {
+                        auto attacker=game->mCells.GetIfNotDeleted(gRemoteCellIndex);
+                        // Kill credit is already in the invited player's progress delta.
+                        gKillCellOriginal(cell,attacker ? attacker->Index() : -1,
+                            attacker ? attacker->mCellResource : nullptr,false,false,0.0f);
+                        WriteProbeLog("Owner replayed guest NPC kill through native death/loot.");
+                    }
+                }
+                if (action.removed && !cell->field_113)
+                    gWorldRemoveOriginal(cell->Index(),action.effects,0.0f,false);
             }
             gWorldActionApplied=action.sequence;
         }
@@ -863,7 +909,7 @@ namespace
         {
             if (CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()) && !gProgressSeedSent)
             {
-                CoopNet::SeedProgress(current);
+                CoopNet::SeedProgress(current,CampaignSpeciesName());
                 gProgressSeedSent = true;
                 gProgressSync.Initialize(current);
             }
@@ -1154,7 +1200,7 @@ namespace
             npc.modelGroup = cell->mModelKey.groupID;
             npc.health=std::clamp(cell->mHealthPoints,0,1000000);
             npc.animation=std::clamp(static_cast<int>(cell->mCurrentAnimation),0,125);
-            npc.dead=cell->field_112; npc.elevation=cell->mRelativeElevation;
+            npc.dead=cell->field_112 || cell->field_113; npc.elevation=cell->mRelativeElevation;
             result.push_back(npc);
         }
         // The Cell pool holds 4096 entries; two slots belong to the players.
@@ -1419,7 +1465,7 @@ namespace
             int pending=0; for (const auto& event:mirror.pendingDamage) pending+=event.second;
             cell->mHealthPoints=std::max(0,state.health-pending);
             mirror.appliedHealth=cell->mHealthPoints;
-            cell->field_112=state.dead;
+            cell->field_112=state.dead || mirror.deathSubmitted;
             cell->mRelativeElevation=state.elevation;
             if (mirror.appliedAnimationSequence != snapshot.npcSequence &&
                 static_cast<std::uint32_t>(cell->mCurrentAnimation)!=state.animation)
@@ -1776,8 +1822,11 @@ namespace
         bytes.insert(bytes.end(), start, start + sizeof(T));
     }
 
+    #include "CampaignName.h"
+    #include "BorrowedCampaigns.h"
     #include "CampaignSync.h"
     #include "HistorySync.h"
+    #include "CellLifecycle.h"
 
     std::string SerializeEditorResource(Editors::cEditorResource* resource)
     {
@@ -1886,15 +1935,23 @@ namespace
         return count ? Base64Encode(std::vector<unsigned char>(bytes,bytes+count*2)) : std::string{};
     }
 
+    bool gApplyingEditorName=false;
     void ApplyEditorName(const std::string& wire)
     {
+        if (gApplyingEditorName) return;
         std::vector<unsigned char> bytes;
         if ((!wire.empty() && !Base64Decode(wire,bytes)) || bytes.size()%2 || bytes.size()>1024) return;
         std::u16string name(bytes.size()/2,u'\0');
         if (!bytes.empty()) memcpy(&name[0],bytes.data(),bytes.size());
         auto editor=Editors::GetEditor();
         if (!editor || !editor->GetEditorModel()) return;
-        editor->SetName(name.c_str());
+        struct NameGuard { NameGuard(){gApplyingEditorName=true;} ~NameGuard(){gApplyingEditorName=false;} } guard;
+        // cEditor::SetName is a no-op when its campaign name override is set
+        // (575E20). Write the actual saved model, including its validated name.
+        editor->GetEditorModel()->SetName(name.c_str());
+        if (!editor->field_1DC.empty()) editor->field_1DC=name.c_str();
+        if (editor->mEditorRequest && editor->mEditorRequest->mbDisableNameEdit)
+            editor->mEditorRequest->field_40=name.c_str();
         auto panel=editor->mpEditorNamePanel.get();
         if (panel && panel->mpLayout)
         {
@@ -1903,6 +1960,23 @@ namespace
                 label->SetCaption(name.empty() ? panel->field_24.c_str() : name.c_str());
         }
         gLastEditorName=wire;
+    }
+
+    using EditorSetNameFunction=void(__thiscall*)(void*,const char16_t*);
+    EditorSetNameFunction gEditorSetNameOriginal=nullptr;
+    bool gEditorSetNameHook=false;
+    void __fastcall EditorSetNameHook(void* self,void*,const char16_t* name)
+    {
+        auto editor=Editors::GetEditor();
+        const auto state=CoopNet::GetSnapshot();
+        if (name && state.connected && state.inviteAccepted && editor && editor->IsActive() &&
+            editor->GetEditorModel() && self==static_cast<Editors::INameableEntity*>(editor)) {
+            size_t length=0; while (name[length] && length<512) ++length;
+            const auto bytes=reinterpret_cast<const unsigned char*>(name);
+            ApplyEditorName(Base64Encode(std::vector<unsigned char>(bytes,bytes+length*2)));
+            return;
+        }
+        gEditorSetNameOriginal(self,name);
     }
 
     // Native EditorUI dispatch (5E00CE -> 5DFD40) uses component activation
@@ -2124,7 +2198,8 @@ namespace
             gRemoteEditorFinish=false; gEditorAcceptRequested=false;
             // Body snapshots omit metadata. Restore the shared name before
             // publishing the initial revision of the next editor visit.
-            if (!snapshot.speciesName.empty()) ApplyEditorName(snapshot.speciesName);
+            const auto restoredName=snapshot.speciesName.empty() ? CampaignSpeciesName() : snapshot.speciesName;
+            if (!restoredName.empty()) ApplyEditorName(restoredName);
             gLastLocalName=ReadEditorName();
             gLastLocalSpecies=SerializeEditorModel();
             gLastLocalBudget=CommittedEditorBudget();
@@ -2261,6 +2336,15 @@ namespace
             // campaign save and model load have both installed the same key.
             if (gEditorAcceptRequested && (!data || !player || saved.empty() ||
                 !SameResourceKey(data->mPlayerCreatureKey,player->mModelKey))) return;
+            if (gEditorAcceptRequested) {
+                ObserveCampaignName();
+                gCampaignName=gLastEditorName;
+                gCampaignNameKnown=true;
+                char line[160]{};
+                sprintf_s(line,"Accepted species name: campaign=%u utf16Bytes=%u",
+                    gNamedCampaign,unsigned(gLastEditorName.size()*3/4));
+                WriteProbeLog(line);
+            }
             if (gRemoteEditorFinish && gEditorAcceptRequested &&
                 snapshot.editorSession==gSharedEditorSession &&
                 gSavedEditorAppearance.Remember(snapshot,gAppliedSpeciesSequence,player->mModelKey))
@@ -3138,7 +3222,9 @@ namespace
 
     void CoopUpdate()
     {
-        const auto snapshot = LocalWorldSnapshot(CoopNet::GetSnapshot());
+        const auto networkState=CoopNet::GetSnapshot();
+        auto snapshot = LocalWorldSnapshot(networkState);
+        ObserveCampaignName();
         ObserveWorldSaveOwner(snapshot);
         if (UpdateWorldLifecycle(snapshot)) return;
         UpdateSessionEndedUI(snapshot);
@@ -3272,24 +3358,38 @@ namespace
             auto player = GetLocalPlayerCell();
             if (player && now - gLastPositionTick >= 50)
             {
+                // First reconcile the loaded campaign. Growth can rebase the
+                // entire local world; decode the owner's pose only afterwards.
+                if (snapshot.inviteAccepted && !gJoinedPlayerPlaced &&
+                    !CoopSession::IsWorldOwner(snapshot,CoopNet::GetRole())) {
+                    UpdateSharedCellProgress(snapshot);
+                    if (!gProgressSync.IsInitialized()) return;
+                    player=GetLocalPlayerCell();
+                    if (!player) return;
+                    snapshot=LocalWorldSnapshot(networkState);
+                }
                 auto game = Simulator::Cell::cCellGame::Get();
                 auto data = game ? game->mpSerializableData.get() : nullptr;
                 const ResourceKey speciesKey = data
                     ? data->mPlayerCreatureKey : player->mModelKey;
+                UpdateLocalCellStability(player, speciesKey, now);
                 if (snapshot.inviteAccepted && !gJoinedPlayerPlaced && snapshot.hasRemotePosition &&
                     now - snapshot.remotePositionReceivedTick < 2000)
                 {
                     if (!CoopSession::IsWorldOwner(snapshot, CoopNet::GetRole()))
                     {
+                        if (now-gLocalCellStableSince<750 || player->field_112 || player->field_113 ||
+                            !GetCellVisual(player) || IsPartCinematic(game)) return;
                         const Math::Vector3 spawn(snapshot.remoteX + std::max(2.0f, snapshot.remoteScale * 4.0f),
                             snapshot.remoteY, snapshot.remoteZ);
                         if (!MoveCellBody(player, spawn, player->mTransform.GetRotation().ToQuaternion()))
                             return;
+                        auto ui=Simulator::Cell::cCellUI::Get();
+                        if (ui) { ui->field_48=spawn; ui->field_54=spawn; ui->field_60=spawn; }
                         WriteProbeLog("Joining player and physics body placed beside owner; local input remains native.");
                     }
                     gJoinedPlayerPlaced = true;
                 }
-                UpdateLocalCellStability(player, speciesKey, now);
                 SubmitLocalAppearance(speciesKey, now, snapshot);
                 const auto& position = player->GetPosition();
                 static ULONG64 lastMovementTrace = 0;
@@ -3498,6 +3598,7 @@ namespace
 
         Simulator::GameLoadParameters parameters{};
         parameters.mGameName = gameName;
+        RestoreBorrowedCampaigns();
         GameNounManager.EnsurePlayer();
         const bool accepted = GamePersistenceManager.LoadGame(parameters);
         WriteProbeLog(accepted
@@ -3559,7 +3660,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Protocol 8: verified world-growth coordinates and shared object interactions enabled."
+            ? "Protocol 9: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
@@ -3576,6 +3677,10 @@ namespace
             : "Native history ABI unavailable: history mirroring is disabled.");
         WriteProbeLog(gDietHistoryHook ? "Verified native food events: guest diet contributes to the owner's history."
             : "Native food history relay unavailable.");
+        WriteProbeLog(gKillCellHook && gCellLifecycleHook ? "Verified cooperative NPC death/loot and avatar-only respawn."
+            : "Cooperative death/respawn hooks unavailable.");
+        WriteProbeLog(gEditorSetNameHook ? "Verified campaign editor name override correction."
+            : "Campaign editor name override hook unavailable.");
     }
 }
 
@@ -3592,6 +3697,22 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         gCampaignSaveHooks = AttachCampaignSaveHooks();
         gTimelineHook = AttachHistoryHook();
         gDietHistoryHook = AttachDietHistoryHook();
+        gKillCellOriginal=reinterpret_cast<KillCellFunction>(VerifiedMotionCode(CoopEngine::kKillCellRva,
+            CoopEngine::kKillCellSize,CoopEngine::kKillCellHash,CoopEngine::kKillCellRelocations));
+        if (gKillCellOriginal) gKillCellHook=DetourAttach(reinterpret_cast<PVOID*>(&gKillCellOriginal),KillCellHook)==NO_ERROR;
+        gResetCellWorldOriginal=reinterpret_cast<ResetCellWorldFunction>(VerifiedMotionCode(CoopEngine::kResetCellWorldRva,
+            CoopEngine::kResetCellWorldSize,CoopEngine::kResetCellWorldHash,CoopEngine::kResetCellWorldRelocations));
+        if (gResetCellWorldOriginal) gCellLifecycleHook=DetourAttach(reinterpret_cast<PVOID*>(&gResetCellWorldOriginal),ResetCellWorldHook)==NO_ERROR;
+        const auto galaxyCode=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr))+0x9f95a0;
+        if (CoopEngine::MatchesStaticCode(galaxyCode,0x79,0x79,0xe51d1273)) {
+            gGalaxySavedWorldsOriginal=reinterpret_cast<GalaxySavedWorldsFunction>(galaxyCode);
+            gBorrowedCampaignHook=DetourAttach(reinterpret_cast<PVOID*>(&gGalaxySavedWorldsOriginal),GalaxySavedWorldsHook)==NO_ERROR;
+        }
+        const auto nameCode=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr))+0x175e20;
+        if (CoopEngine::MatchesStaticCode(nameCode,0x2d,0x2d,0x0b40f7fa)) {
+            gEditorSetNameOriginal=reinterpret_cast<EditorSetNameFunction>(nameCode);
+            gEditorSetNameHook=DetourAttach(reinterpret_cast<PVOID*>(&gEditorSetNameOriginal),EditorSetNameHook)==NO_ERROR;
+        }
         if (GetCellMotionFunctions().Ready())
         {
             gCellGraphicsUpdateOriginal = reinterpret_cast<CellGraphicsUpdateFunction>(VerifiedMotionCode(
@@ -3623,12 +3744,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (gEditorUIMessageOriginal)
             gEditorUIHookAttached=DetourAttach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook)==NO_ERROR;
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        if (CommitDetours() != NO_ERROR) { gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
+        if (CommitDetours() != NO_ERROR) { gKillCellHook=false; gCellLifecycleHook=false; gBorrowedCampaignHook=false; gEditorSetNameHook=false; gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
         PrepareDetours(module);
+        if (gKillCellHook) DetourDetach(reinterpret_cast<PVOID*>(&gKillCellOriginal),KillCellHook);
+        if (gCellLifecycleHook) DetourDetach(reinterpret_cast<PVOID*>(&gResetCellWorldOriginal),ResetCellWorldHook);
+        if (gBorrowedCampaignHook) DetourDetach(reinterpret_cast<PVOID*>(&gGalaxySavedWorldsOriginal),GalaxySavedWorldsHook);
+        if (gEditorSetNameHook) DetourDetach(reinterpret_cast<PVOID*>(&gEditorSetNameOriginal),EditorSetNameHook);
         if (gModelAttachmentsHook) DetourDetach(reinterpret_cast<PVOID*>(&gModelAttachmentsOriginal),ModelAttachmentsHook);
         if (gTimelineHook) DetourDetach(reinterpret_cast<PVOID*>(&gTimelineShowOriginal),TimelineShowHook);
         if (gCampaignSaveHooks)

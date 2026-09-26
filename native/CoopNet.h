@@ -144,7 +144,7 @@ namespace CoopNet
     void SubmitWorldLeave(std::uint64_t world);
     std::uint64_t SubmitWorldAction(WorldAction action);
     std::vector<WorldAction> TakeWorldActions();
-    void SeedProgress(const CellProgress& progress);
+    void SeedProgress(const CellProgress& progress, const std::string& speciesName = {});
     void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
         const std::array<int, 13>& absoluteUnlocks);
     void SubmitEditorOpen(std::uint32_t editorID, const std::string& initialSpecies, int budget, const std::string& name);

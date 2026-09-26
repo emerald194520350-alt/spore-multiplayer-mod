@@ -11,6 +11,7 @@
 #include "campaign.test.h"
 #include "engine-cell-body.test.h"
 #include "engine-coop-actions.test.h"
+#include "engine-lifecycle.test.h"
 
 // Execute only the verified, self-contained movement routines against fixture
 // memory. DONT_RESOLVE_DLL_REFERENCES never calls the game's entry point.
@@ -106,5 +107,5 @@ inline int TestEngineMotion(const char* executable)
     move(cell.data(), &start);
     Vec result; std::memcpy(&result,cell.data()+0x4c,sizeof(result));
     require(closeEnough(result.x,100) && closeEnough(result.y,100), "Simple cell teleport failed"); ++checks;
-    return checks + TestEngineReplicaCollision(base) + TestPeerProjectionAgainstEngine(base) + TestEngineEditorDispatch(base) + TestCampaignAbi(base) + TestEngineCellBody(base) + TestEngineCoopActions(base);
+    return checks + TestEngineReplicaCollision(base) + TestPeerProjectionAgainstEngine(base) + TestEngineEditorDispatch(base) + TestCampaignAbi(base) + TestEngineCellBody(base) + TestEngineCoopActions(base) + TestEngineLifecycle(base);
 }

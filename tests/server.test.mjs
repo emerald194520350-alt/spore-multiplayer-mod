@@ -109,7 +109,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 8, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 9, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -229,10 +229,17 @@ try {
   const duplicateRemoval=await guest.request({type:'worldAction',worldGeneration:state.worldGeneration,sequence:3,
     id:0x80000001,resource:123456,damage:0,removed:true,effects:true},m=>m.type==='worldAction'&&m.sequence===3);
   check(!duplicateRemoval.removed && !duplicateRemoval.effects,'An already removed shared object cannot generate owner loot twice');
+  const lethal={type:'worldAction',worldGeneration:state.worldGeneration,sequence:4,
+    id:0x80000002,resource:654321,damage:1000000,removed:false,effects:false};
+  guest.send(lethal);
+  const ownerKill=await host.wait(m=>m.type==='worldAction' && m.sequence===4);
+  check(ownerKill.damage===1000000 && !ownerKill.removed && !ownerKill.effects,
+    'A lethal guest hit reaches native owner death without deleting the NPC before loot');
+  await failure(guest,lethal,'Stale world action');
   const food=[0x80000003,100,1,2,0,0,1,0.5,0.5,1,0,0,0,0,1,0,0,0];
   const full=Array.from({length:4094},(_,i)=>[i+10,...food.slice(1)]).flat();
-  const fullFrame=await host.request({type:'npcSnapshot',sequence:1,actionAck:3,npcs:full},m=>m.type==='npcSnapshot'&&m.sequence===1);
-  check(fullFrame.npcs.length===4094*18 && fullFrame.actionAck===3,'All loaded food/scenery objects fit in a full pool snapshot');
+  const fullFrame=await host.request({type:'npcSnapshot',sequence:1,actionAck:4,npcs:full},m=>m.type==='npcSnapshot'&&m.sequence===1);
+  check(fullFrame.npcs.length===4094*18 && fullFrame.actionAck===4,'All loaded food/scenery objects fit in a full pool snapshot');
   await failure(host,{type:'npcSnapshot',sequence:2,actionAck:3,npcs:[...full,...food]},'Invalid npcs');
   const emptyNpcs = await host.request({ type: 'npcSnapshot', actionAck: 0, sequence: 2, npcs: [] }, m => m.type === 'npcSnapshot' && m.sequence === 2);
   check(emptyNpcs.npcs.length === 0, 'An empty authoritative population removes departed NPCs');
@@ -250,12 +257,15 @@ try {
 
   const seedUnlocks = Array(13).fill(0);
   seedUnlocks[2] = 1;
+  await failure(host, { type: 'seedProgress', speciesName:'AA==' }, 'speciesName');
   await failure(host, { type: 'seedProgress', food: 999, plantFood: 'broken' }, 'Invalid plantFood');
   const rejectedSeed = await host.request({ type: 'snapshot' }, m => m.type === 'state');
   check(rejectedSeed.food === 0 && !rejectedSeed.progressInitialized && rejectedSeed.revision === state.revision,
     'Failed progress validation rolls back all partially assigned session fields');
+  const savedName=Buffer.from('Сохранённый вид 1 🦠','utf16le').toString('base64');
   state = await host.request({
     type: 'seedProgress', food: 10, plantFood: 6, overPlantFood: 2,
+    speciesName:savedName,
     overAnimalFood: 1, spent: 3, unlocks: seedUnlocks, missions: missions(),
     killCount: 0, playerHasMoved: true, playerHasEaten: true,
     partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false
@@ -263,6 +273,8 @@ try {
   const seededGuest = await guest.wait(stateMessage(state.revision));
   check(state.progressInitialized && seededGuest.progressInitialized,
     'Host seeds the shared cell progression once');
+  check(state.speciesName===savedName && seededGuest.speciesName===savedName,
+    'Loading a saved campaign restores its Unicode name for both players before evolution');
   check(state.progress.food === 10 && state.progress.spent === 3 && state.progress.unlocks[2] === 1,
     'Seeded cell currency and unlocks are identical');
 
@@ -429,6 +441,7 @@ try {
   const { c: restored } = await hello('host');
   const loaded = await restored.wait(m => m.type === 'state');
   check(loaded.species === species && loaded.dna === 30 && loaded.stage === 'creature', 'Server restart restores protocol save');
+  check(loaded.speciesName===sharedName, 'Server restart preserves the accepted species name');
   check(loaded.progressInitialized && loaded.progress.food === 14 &&
     loaded.progress.spent === 2 && loaded.progress.unlocks[7] === 1,
     'Server restart restores shared progress and parts');
@@ -456,12 +469,14 @@ try {
   }, 'World owner authority');
   state = await reverseGuest.request({
     type: 'seedProgress', food: 9, plantFood: 3, overPlantFood: 0, overAnimalFood: 0,
+    speciesName:savedName,
     spent: 0, unlocks: Array(13).fill(0), missions: missions(), killCount: 0,
     playerHasMoved: true, playerHasEaten: true,
     partCinematicPlayed: false, showMateButton: false, firstEditorEntry: false
   }, stateMessage(state.revision + 1));
   check(state.progressInitialized && state.progress.food === 9,
     'The inviter, not the fixed host role, seeds the shared cell campaign');
+  check(state.speciesName===savedName, 'A new invitation replaces the previous world name with the loaded campaign name');
   check(state.worldGeneration > invitation.worldGeneration &&
     state.hostProgressSequence === 0 && state.guestProgressSequence === 0,
     'A new world starts a fresh inventory acknowledgement generation');

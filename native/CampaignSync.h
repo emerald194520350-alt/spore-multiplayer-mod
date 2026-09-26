@@ -27,7 +27,7 @@ bool BlockGuestWorldSave()
 
 bool __fastcall SavePrepareHook(void* self, void*)
 {
-    if (!BlockGuestWorldSave()) return gSavePrepareOriginal(self);
+    if (!BlockGuestWorldSave()) { RestoreBorrowedCampaigns(); return gSavePrepareOriginal(self); }
     WriteProbeLog("Guest campaign file preparation blocked: the world is saved by its owner.");
     return true;
 }
@@ -39,7 +39,7 @@ bool __fastcall SaveCleanupHook(void* self, void*)
 
 void __fastcall SaveWorldHook(void* self, void*, const char16_t* name, bool update)
 {
-    if (!BlockGuestWorldSave()) { gSaveWorldOriginal(self, name, update); return; }
+    if (!BlockGuestWorldSave()) { gSaveWorldOriginal(self, name, update); SaveCampaignName(); return; }
     // Keep the native save state machine's start/end notifications. The outer
     // handler still restores the cursor, pause lease and Save-and-Quit flow.
     // Preparation and cleanup are also intercepted: both modify Game0 files.

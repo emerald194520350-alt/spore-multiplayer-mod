@@ -135,6 +135,9 @@ if ($instances.Count -eq 0) {
             Get-ChildItem -LiteralPath $primaryGames -Force | ForEach-Object {
                 Copy-Item -LiteralPath $_.FullName -Destination $secondGames -Recurse -Force
             }
+            # Mark launch-prepared copies so the DLL can filter their menu entries.
+            Set-Content -LiteralPath (Join-Path $secondGames 'SporeCoop-prepared-copies.txt') `
+                -Value 'Prepared from Spore while both game processes were closed.' -Encoding UTF8
         }
         foreach ($fileName in @('Planets.package', 'Pollination.package',
                 'EditorSaves.package', 'RigblockInfo.package')) {

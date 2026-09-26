@@ -1,8 +1,8 @@
-# spore multiplayer mod beta 11
+# spore multiplayer mod beta 14
 
 SporeCoop is an experimental local co-op mod for SPORE. It is designed to let two SPORE instances on the same PC share a game session, with a future LAN/Radmin VPN mode planned for remote players.
 
-The project is currently **Beta 13** (protocol 8), an experimental prerelease. Player 2's native mating partner survives NPC synchronization; species names are restored between editor visits and committed before accepting an evolution. Guest food events now contribute to the owner's native History trajectory after their shared counters are applied. The guest returns to the galaxy menu when the owner leaves or the connection ends, with campaign saves blocked through the exit transition. Earlier shared-body and crash fixes remain included. Update **both game DLLs and the server**: protocol 8 is incompatible with Beta 1–12. Automated and isolated native-engine checks pass; these scenarios still require verification in two game windows. See [release notes](RELEASE_NOTES.md) for details.
+The project is currently **Beta 14** (protocol 9), an experimental build. Campaign names are written into the editor model and saved beside the owner's campaign. Joining applies shared growth before placing the guest beside the owner. Guest NPC kills use the owner's native death and loot routine; cooperative avatar respawn preserves the existing NPC population. The second profile's launch-prepared campaign copies are filtered from its galaxy menu. Update **both game DLLs and the server**: protocol 9 is incompatible with Beta 1–13. Automated checks and isolated game-function tests do not replace verification in two game windows. See [release notes](RELEASE_NOTES.md) for details.
 
 Beta 2 adds native articulated-body movement, growth-aware world coordinates,
 shared object interactions and NPC interpolation. Cell progress now invokes

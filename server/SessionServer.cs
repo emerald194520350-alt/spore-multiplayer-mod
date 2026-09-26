@@ -80,7 +80,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 8;
+        const int Protocol = 9;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -618,6 +618,7 @@ namespace SporeCoop
             {
                 if (peer.Role != State.InviteFrom) throw new ArgumentException("World owner authority required");
                 if (State.ProgressInitialized) { Send(peer, Snapshot()); return; }
+                string restoredName=data.ContainsKey("speciesName") ? SpeciesName(data) : "";
                 State.FoodProgression = (int)Integer(data, "food", 0, 100000000);
                 State.PlantFoodProgression = (int)Integer(data, "plantFood", 0, 100000000);
                 State.OverPlantFoodProgression = (int)Integer(data, "overPlantFood", 0, 100000000);
@@ -632,6 +633,7 @@ namespace SporeCoop
                 State.ShowMateButton = Boolean(data, "showMateButton");
                 State.FirstEditorEntry = Boolean(data, "firstEditorEntry");
                 State.ProgressInitialized = true;
+                State.SpeciesName=restoredName;
                 Changed();
                 return;
             }

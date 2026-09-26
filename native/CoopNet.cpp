@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 8;
+    constexpr int kProtocol = 9;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -1070,9 +1070,9 @@ namespace CoopNet
         std::vector<WorldAction> result; result.swap(gWorldActions); return result;
     }
 
-    void SeedProgress(const CellProgress& progress)
+    void SeedProgress(const CellProgress& progress, const std::string& speciesName)
     {
-        Queue("{\"type\":\"seedProgress\"," + ProgressFields(progress, progress.unlocks, false) + "}");
+        Queue("{\"type\":\"seedProgress\",\"speciesName\":\""+JsonEscape(speciesName)+"\"," + ProgressFields(progress, progress.unlocks, false) + "}");
     }
 
     void SubmitProgressDelta(std::uint64_t sequence, const CellProgress& delta,
