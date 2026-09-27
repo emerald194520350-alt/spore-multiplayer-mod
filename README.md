@@ -1,6 +1,6 @@
 # Spore Multiplayer Mod — Version 1.0.1
 
-**Только первый этап — «Клетка». / Cell stage only.**
+**Cell stage only.**
 
 SporeCoop is a community co-op mod for the Steam edition of **SPORE: Galactic Adventures** on Windows. Version 1 covers the first stage, **Cell**. Creature, Tribal, Civilization and Space multiplayer are not included. Later stages are planned for future versions.
 
@@ -10,13 +10,13 @@ The supported launch workflow runs two game windows on one PC with separate prof
 
 Finish Cell and close the final History screen as usual. The mod intercepts the transition before landfall and the Creature editor, then shows a black screen:
 
-> Первый этап завершён!
+> The first stage is complete!
 >
-> Остальные этапы скоро появятся
+> More stages are coming soon
 >
-> в моде для SPORE в Steam.
+> to the mod for SPORE on Steam.
 
-The screen also identifies **Version 1 — этап «Клетка»** and has a **Main menu / В главное меню** button. An English version is shown for other game locales. Both players receive completion; a player still viewing History can close it first. The owner requests a native Cell save; the invited player's campaign remains protected from saving. Normal History viewing during Cell does not end the game.
+The screen also identifies **Version 1 — Cell stage** and has a **Main menu** button. The mod uses localized text for Russian game installations. Both players receive completion; a player still viewing History can close it first. The owner requests a native Cell save; the invited player's campaign remains protected from saving. Normal History viewing during Cell does not end the game.
 
 The Steam wording describes the target game and planned updates. This repository distributes the mod through GitHub releases.
 
@@ -38,7 +38,7 @@ Requirements: Windows, the Steam Galactic Adventures executable supported by Spo
 
 1. Close both SPORE windows.
 2. Download and extract `spore-multiplayer-mod-v1.0.1-windows.zip` from [Releases](https://github.com/emerald194520350-alt/spore-multiplayer-mod/releases).
-3. Run `Start-TwoSpore.ps1`. On an existing installation, the desktop shortcut **SPORE Coop - 2 окна** runs the same workflow.
+3. Run `Start-TwoSpore.ps1`. On an existing installation, the **SPORE Coop** desktop shortcut runs the same workflow.
 4. Load a Cell world in one window and invite the other player through the pause menu. Accept in the second window.
 
 **Update both DLLs and the server together. Version 1 uses protocol 10 and is incompatible with Beta 1–15.** The launcher installs the DLLs into both Launcher Kit directories and runs the matching server.

@@ -47,18 +47,18 @@ if ($runningGames.Count -gt 0) {
         }
     }
     if ($updatePending) {
-        throw 'Готова новая сборка. Закрой оба окна SPORE и запусти этот скрипт ещё раз: он обновит мод и сервер вместе.'
+        throw 'A new build is ready. Close both SPORE windows and run this script again to update the mod and server together.'
     }
 }
 
 if (-not (Test-Path -LiteralPath $primaryLauncher)) {
-    throw "Основной ModAPI Launcher не найден: $primaryLauncher"
+    throw "Primary ModAPI Launcher not found: $primaryLauncher"
 }
 if (-not (Test-Path -LiteralPath $secondLauncherScript)) {
-    throw "Скрипт второго окна не найден: $secondLauncherScript"
+    throw "Second-window script not found: $secondLauncherScript"
 }
 if (-not (Test-Path -LiteralPath $serverScript)) {
-    throw "Скрипт сервера не найден: $serverScript"
+    throw "Server script not found: $serverScript"
 }
 
 # CREATE_SUSPENDED, which ModAPI needs for injection, fails when Windows forces
@@ -85,7 +85,7 @@ if ($compatibilityFlags) {
         else {
             Remove-ItemProperty -LiteralPath $compatibilityKey -Name $gameExecutable
         }
-        Write-Host 'Отключён несовместимый с инжектором флаг RUNASADMIN для SporeApp.exe.' -ForegroundColor Yellow
+        Write-Host 'Disabled the RUNASADMIN flag for SporeApp.exe because it is incompatible with the injector.' -ForegroundColor Yellow
     }
 }
 
@@ -94,7 +94,7 @@ if ($compatibilityFlags) {
 
 $instances = @(Get-Process -Name SporeApp -ErrorAction SilentlyContinue)
 if ($instances.Count -ge 2) {
-    Write-Host 'Два окна Spore уже запущены.' -ForegroundColor Green
+    Write-Host 'Two Spore windows are already running.' -ForegroundColor Green
     Start-Sleep -Seconds 2
     exit 0
 }
@@ -108,7 +108,7 @@ if ($instances.Count -eq 0) {
             }
             Copy-Item -LiteralPath $builtMod -Destination $target -Force
         }
-        Write-Host 'Установлена последняя сборка кооперативного мода.' -ForegroundColor Green
+        Write-Host 'Installed the latest co-op mod build.' -ForegroundColor Green
     }
 
     if (Test-Path -LiteralPath $primaryProfile) {
@@ -163,10 +163,10 @@ if ($instances.Count -eq 0) {
                 Copy-Item -LiteralPath $_.FullName -Destination $secondCreations -Recurse -Force
             }
         }
-        Write-Host 'Актуальный мир первого профиля скопирован во второй профиль.' -ForegroundColor Green
+        Write-Host 'Copied the current world from the first profile to the second profile.' -ForegroundColor Green
     }
 
-    Write-Host 'Запускаю первое окно Spore прямым инжектором ModAPI...'
+    Write-Host 'Starting the first Spore window with the direct ModAPI injector...'
     & $secondLauncherScript -Profile 1 -Role host `
         -LauncherRoot $primaryLauncherRoot -Server $coopServer `
         -Port $coopPort -Token $hostToken
@@ -177,11 +177,11 @@ if ($instances.Count -eq 0) {
         $first = Get-Process -Name SporeApp -ErrorAction SilentlyContinue |
             Select-Object -First 1
     }
-    if (-not $first) { throw 'Первое окно Spore не запустилось за 30 секунд.' }
+    if (-not $first) { throw 'The first Spore window did not start within 30 seconds.' }
     Start-Sleep -Seconds 5
 }
 
-Write-Host 'Запускаю второе изолированное окно Spore...'
+Write-Host 'Starting the second isolated Spore window...'
 & $secondLauncherScript -Profile 2 -Role guest `
     -Server $coopServer -Port $coopPort -Token $guestToken
 
@@ -192,7 +192,7 @@ for ($i = 0; $i -lt 60; $i++) {
     if ($instances.Count -ge 2) { break }
 }
 
-if ($instances.Count -lt 2) { throw 'Второе окно Spore не запустилось за 30 секунд.' }
+if ($instances.Count -lt 2) { throw 'The second Spore window did not start within 30 seconds.' }
 
-Write-Host 'Готово: два окна запущены. Хост загружает мир, открывает Esc и нажимает Invite friend to co-op; во втором окне нужно принять приглашение.' -ForegroundColor Green
+Write-Host 'Ready: both windows are running. The host loads a world, opens the Esc menu and selects Invite friend to co-op; accept the invitation in the second window.' -ForegroundColor Green
 Start-Sleep -Seconds 3

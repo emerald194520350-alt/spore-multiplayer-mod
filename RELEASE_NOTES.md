@@ -1,581 +1,573 @@
-# Version 1.0.1 — фрагменты деталей после убийств гостя — 27 сентября 2026
+# Version 1.0.1 — part fragments from guest kills — September 27, 2026
 
-Только этап «Клетка». Протокол остаётся 10, сервер совместим с Version 1.0.0.
+Cell stage only. Protocol remains 10; the server is compatible with Version 1.0.0.
 
-- Исправлен отбор фрагментов деталей при убийствах приглашённым игроком:
-  нативная функция отбрасывала подходящую деталь, если моб находился вне
-  внутренней области камеры владельца. Для обработки гостевых убийств
-  снимается именно эта проверка; положение камеры не меняется.
-- Фрагмент создаётся штатной таблицей добычи в позиции убитого моба. Проверки
-  наличия детали на его теле, уже открытых деталей и активного предмета
-  открытия, а также нативные вероятности добычи сохранены. Деталь не выдаётся
-  автоматически: её по-прежнему нужно подобрать.
-- При отложенном распаде трупа сохраняется признак убийства гостем; повторное
-  удаление не оставляет этот признак для других мобов или нового мира.
+- Fixed part-fragment selection for kills by the invited player. The native
+  function rejected eligible parts when the NPC was outside the inner area of
+  the owner's camera. Guest kill processing now bypasses that check without
+  changing the camera position.
+- Fragments spawn at the defeated NPC through the native loot table. Checks for
+  parts present on the NPC, parts already unlocked, an active discovery pickup,
+  and native drop probabilities remain in place. Parts are not awarded
+  automatically: players still need to collect the fragment.
+- Guest kill attribution survives delayed corpse breakup. Repeated removal does
+  not leave that attribution attached to other NPCs or a new world.
 
-- После завершения этапа открытая итоговая История удерживает игровой мир,
-  пока игрок её не закроет. Раньше выход владельца мог передать управление
-  обычному выходу гостя и прервать чтение Истории.
-- Завершение учитывается и при закрытии соединения до следующего игрового
-  обновления, когда флаг принятого приглашения уже сброшен.
-- На время чтения Истории экран завершения и сохранение не запускаются.
-  Обычная История до завершения этапа сохраняет прежнее поведение выхода.
-- 115 клиентских и 154 изолированные проверки движка: настоящий селектор
-  добычи воспроизводит потерю фрагмента и проверяет исправление для девяти
-  типов деталей, отсутствие выдачи уже открытой/отсутствующей у моба детали,
-  сохранение нативной защиты предмета от удаления и обычного поведения хоста.
-  Конечное создание объекта в тесте заменено фикстурой.
-- Сборка DLL: 0 ошибок, 91 прежнее предупреждение SDK/адаптера. Также прошли
-  142 серверные проверки, исходные инварианты и git diff --check.
-- Выпадение и подбор в двух окнах, экран завершения, сохранение и возврат
-  в меню всё ещё требуют игровой проверки. Автотесты её не заменяют.
+- After stage completion, an open final History screen keeps the world loaded
+  until the player closes it. Previously, the owner's departure could trigger
+  the normal guest exit and interrupt History.
+- Completion is also recognized when the connection closes before the next game
+  update and the accepted-invitation flag has already been cleared.
+- The ending screen and save request wait until History closes. Ordinary History
+  viewing before stage completion retains the previous exit behavior.
+- Passed 115 client and 154 isolated engine checks. The real loot selector
+  reproduces the missing fragment and tests the fix for nine part types, rejects
+  parts already unlocked or absent from the NPC, preserves native pickup
+  retention, and keeps normal host behavior. Final object creation is replaced
+  by a fixture in these tests.
+- DLL build: 0 errors and 91 existing SDK/adapter warnings. Also passed 142 server
+  checks, source invariants, and `git diff --check`.
+- Fragment drops and collection in two windows, the ending screen, saving, and
+  return to the menu still require gameplay verification. Automated tests do not
+  replace that verification.
 
-Установка: `spore-multiplayer-mod-v1.0.1-windows.zip`, обновить обе DLL при
-закрытых игровых процессах. Сервер в пакете тот же, что в Version 1.0.0.
-
----
-
-# Version 1 — только этап «Клетка» — 27 сентября 2026 (протокол 10)
-
-Первый основной релиз Spore Multiplayer Mod предназначен **только для первого
-этапа SPORE — «Клетка»**. Этапы «Существо», «Племя», «Цивилизация» и «Космос»
-пока не поддерживаются в мультиплеере. Они планируются в следующих версиях.
-
-- После закрытия итоговой Истории перехватывается штатный переход на сушу.
-  Вместо второго этапа показывается чёрный экран: «Первый этап завершён!
-  Остальные этапы скоро появятся в моде для SPORE в Steam».
-- На экране указана Version 1 и есть кнопка «В главное меню». Язык берётся
-  из настроек самой игры. Для других локалей предусмотрен английский текст.
-- Завершение передаётся обоим игрокам. Открытую Историю можно дочитать и
-  закрыть; обычный просмотр Истории во время игры не завершает этап.
-- Владелец запрашивает штатное сохранение мира «Клетки»; гость не записывает
-  копию кампании. Открытие редактора второго этапа также заблокировано.
-- Повторные события завершения безопасны, новое приглашение сбрасывает
-  экран завершения. Уже показанный экран сохраняется при выходе владельца.
-- Включены все изменения Beta 14–15: имя вида, сохранения, вход и рост гостя,
-  размер при возрождении, мясная добыча и исправления пересоздания реплик.
-
-Установка: закрыть оба окна, распаковать spore-multiplayer-mod-v1.0.0-windows.zip
-и запустить Start-TwoSpore.ps1. **Обновить обе DLL и сервер**: протокол 10
-несовместим с Beta 1–15. Поддерживаемый сценарий — два окна на одном ПК,
-Steam SPORE: Galactic Adventures, проверенный EXE March 2017 и ModAPI Launcher Kit.
-Полноценная игра между разными компьютерами пока не завершена.
-
-Проверены сборки, 142 серверные проверки, 108 клиентских проверок, 116 проверок
-функций EXE и исходные инварианты. Настоящий callback Истории на изолированных
-данных сначала закрывает Историю и затем вызывает перехват завершения;
-обычное закрытие Истории этот перехват не вызывает.
-
-Полное прохождение в двух окнах, внешний вид экрана завершения и сохранение
-при этом переходе ещё не проверены в запущенной игре. Номер Version 1 обозначает
-релиз первого этапа, а не подтверждение отсутствия всех игровых ошибок.
-Мод распространяется через GitHub; упоминание Steam относится к версии SPORE.
+Installation: extract `spore-multiplayer-mod-v1.0.1-windows.zip` and update both
+DLLs while the game processes are closed. The bundled server is unchanged from
+Version 1.0.0.
 
 ---
 
-# Beta 15 — 27 сентября 2026 (протокол 9)
+# Version 1 — Cell stage only — September 27, 2026 (protocol 10)
 
-- При входе приглашённого игрока общий прогресс применяется сразу через
-  штатную загрузку стадии. Старые открытия деталей, включая шипы, и прежний
-  рост не воспроизводятся как новые события. Завершается старый сценарий
-  появления из яйца, удерживающий управление и камеру. Новые открытия во
-  время игры продолжают показываться; локальные таймеры подсказок не
-  обнуляются при каждом сетевом обновлении.
-- При размещении гостя координаты привязываются к текущему положению и
-  масштабу владельца. Это устраняет найденное рассогласование со старой
-  точкой появления после загрузки. Физические тела сетевых существ и еды
-  создаются сразу нужного размера.
-- Возрождение использует правильный множитель размера мира: SpawnAvatar
-  ожидает не визуальный размер клетки. Сохраняются размер и положение
-  живого аватара до анимации смерти. Замена аватара сохраняет существующих
-  NPC; запасной полный сброс гостя также восстанавливает общий рост.
-- Распад убитого гостем NPC передаётся владельцу и вызывает штатную таблицу
-  мясной добычи. В Beta 14 вызывалась только более ранняя процедура смерти,
-  которая не заменяет распад тела на обычные кусочки мяса.
-- Фоновые клетки больше не копируются как интерактивные NPC. Локальное
-  удаление сетевых реплик по расстоянию или масштабу блокируется на госте;
-  загрузка мира и удаление владельцем сохраняют штатную очистку. Это
-  исправляет найденные причины массового пересоздания реплик и лагов.
+The first major Spore Multiplayer Mod release supports **only SPORE's first
+stage, Cell**. Creature, Tribal, Civilization, and Space multiplayer are not
+supported yet. They are planned for future versions.
 
-Сборка DLL: 0 ошибок, 91 прежнее предупреждение SDK/адаптера. Пройдены
-98 проверок клиента и 110 изолированных проверок функций игрового EXE,
-включая расчёт размера при разных стадиях роста и выбор штатной таблицы
-мяса при распаде тела, а также проверка исходных инвариантов.
-Тест таблицы мяса не считает реальные объекты в запущенной игре.
+- Closing final History intercepts the native landfall transition. Instead of
+  the second stage, a black screen displays: "The first stage is complete!
+  The remaining stages are coming soon in the mod for SPORE on Steam."
+- The screen identifies Version 1 and includes a "Main menu" button. The language
+  follows the game settings, with English text for other locales.
+- Completion is shared by both players. Players can finish reading and close
+  an open History screen; ordinary History viewing does not end the stage.
+- The owner requests a native Cell world save. The guest does not write a copy
+  of the campaign. Entry to the second-stage editor is also blocked.
+- Repeated completion events are safe, and a new invitation resets the ending
+  screen. An already displayed ending survives the owner's departure.
+- Includes all Beta 14–15 changes: species names, saves, guest entry and growth,
+  respawn size, meat drops, and fixes for repeated NPC recreation.
 
-Нужна проверка в двух окнах: вход в мир выросшего хоста, движение гостя,
-отсутствие повторных старых уведомлений, смерть гостя и его убийства NPC.
-Устранение всех игровых проявлений, включая шар на скриншоте, пока не
-подтверждено интерактивной сессией. Обновить обе DLL; сервер Beta 14
-совместим. Запуск: Start-TwoSpore.ps1 при закрытых играх.
+Installation: close both windows, extract `spore-multiplayer-mod-v1.0.0-windows.zip`,
+and run `Start-TwoSpore.ps1`. **Update both DLLs and the server**: protocol 10 is
+incompatible with Beta 1–15. The supported setup is two windows on one PC,
+Steam SPORE: Galactic Adventures, the verified March 2017 executable, and ModAPI
+Launcher Kit. Complete play between separate computers remains unfinished.
 
----
+Validated DLL/server builds, 142 server checks, 108 client checks, 116 checks of
+executable functions, and source invariants. The real History callback, running
+on isolated data, closes History before invoking the ending interception.
+Ordinary History closure does not invoke that interception.
 
-# Beta 14 — 26 сентября 2026 (протокол 9)
-
-- Название вида записывается прямо в модель: штатный cEditor::SetName
-  игнорировал изменения при непустом имени кампании. При сохранении владельцем
-  имя также записывается в Games/Game0/SporeCoop-name-<gameID>.txt; при загрузке
-  оно передаётся вместе с начальным прогрессом нового приглашения.
-- После загрузки сохранения гость сначала применяет общий рост и дожидается
-  готовности тела, затем размещается рядом с владельцем. Обновляются физические
-  узлы, цель движения и позиция камеры.
-- Смертельный удар гостя передаётся владельцу, который вызывает штатную смерть
-  NPC с созданием мяса и анимацией. Повторная смерть не создаёт вторую добычу.
-- При смерти аватара в совместной игре заменяется только аватар. Общий пул NPC,
-  еды и спавнеров сохраняется. Загрузка, одиночная игра и сброс живого аватара
-  продолжают использовать полную штатную процедуру.
-- Скопированные запуском миры второго профиля скрываются при построении меню
-  сохранений. Сами файлы и записи кампаний остаются доступными приглашениям.
-  Новые миры, созданные во втором окне после запуска, не входят в этот фильтр.
-
-Обновить обе DLL и сервер вместе. Запуск: Start-TwoSpore.ps1 при закрытых играх.
-Старое утраченное название автоматически восстановить невозможно: задайте его
-в редакторе и сохраните мир владельцем. Подготовка копии второго профиля и её
-резервирование перед запуском остаются частью существующего локального режима.
-
-Проверка: сборка DLL/сервера, 134 серверные проверки, 98 проверок клиента,
-101 проверка функций игрового EXE, включая реальную процедуру смерти NPC
-и воспроизведение отказа штатного редактора менять имя кампании. Игровые
-сценарии в двух окнах ещё не подтверждены: повторное приглашение после загрузки,
-мясо от убийства гостем, смерть владельца без восстановления NPC, имя после
-сохранения/перезапуска и отсутствие копий миров в меню второго окна.
+A full two-window playthrough, the ending screen's appearance, and saving during
+this transition have not been verified in a running game. Version 1 identifies
+the first-stage release scope; it does not confirm the absence of gameplay bugs.
+The mod is distributed through GitHub; Steam refers to the target game version.
 
 ---
 
-# Beta 13 — 26 сентября 2026 (протокол 8)
+# Beta 15 — September 27, 2026 (protocol 9)
 
-- Зов партнёра у второго игрока: очистка местных NPC больше не удаляет
-  нативного партнёра, которого создала кнопка зова. Его движение и спаривание
-  остаются под управлением игры; вход в редактор передаётся обоим игрокам.
-- Название вида восстанавливается при следующем входе в редактор. Пустое
-  имя кэшированной модели не стирает сохранённое общее имя. Текст в активном
-  поле записывается в модель перед галочкой и не затирается при закрытии UI.
-- В общую «Историю» передаются события поедания растений и мяса гостем.
-  Сначала передаются и применяются соответствующие счётчики питания,
-  затем хост вызывает штатный регистратор истории. Повторные события и
-  пакеты другого мира отклоняются. Прирост растительной еды воспроизводится
-  с правильным типом питания, включая нативный рост клетки.
-- Возврат владельца мира в меню завершает сессию, даже если его окно игры
-  остаётся открытым. Гость возвращается в меню галактики при выходе владельца
-  или потере соединения. Переход в редактор и загрузка не считаются выходом.
-- Мир по-прежнему записывает только владелец приглашения. Защита гостевого
-  сохранения удерживается на всём переходе выхода; завершение мира не требует
-  обращения к старому пулу клеток. Сохранение существа редактором разрешено.
-- Сохранены изменения Beta 12 и исправления вылетов Beta 9–11.
+- Invited players receive shared progress immediately through native stage
+  loading. Previous part discoveries, including spikes, and earlier growth are
+  not replayed as new events. The old egg-entry sequence is finished to release
+  input and the camera. New discoveries during gameplay still appear; local
+  tutorial timers are not reset on every network update.
+- Guest placement anchors coordinates to the owner's current position and
+  scale, fixing the identified mismatch with the old spawn point after loading.
+  Network creatures and food start with correctly sized physics bodies.
+- Respawning uses the correct world-size factor: SpawnAvatar does not expect
+  the visible cell scale. The living avatar's size and position are retained
+  before its death animation. Avatar replacement preserves existing NPCs; the
+  fallback full guest reset also restores shared growth.
+- Breakup of an NPC killed by the guest is relayed to the owner and invokes the
+  native meat loot table. Beta 14 called only the earlier death routine, which
+  does not replace breakup into ordinary meat pieces.
+- Background cells are no longer copied as interactive NPCs. Guest-side distance
+  and scale culling of network replicas is blocked; world loading and removal by
+  the owner retain native cleanup. This addresses identified causes of repeated
+  replica recreation and lag.
 
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-13-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Нужно обновить **обе DLL и сервер**. Протокол 8 несовместим с Beta 1–12.
+DLL build: 0 errors and 91 existing SDK/adapter warnings. Passed 98 client checks,
+110 isolated executable-function checks, including size calculations at different
+growth levels and native meat-table selection during breakup, and source
+invariants. The meat-table test does not count real objects in a running game.
 
-Проверено: сборка DLL и сервера, 128 серверных проверок, 98 нативных проверок,
-89 проверок функций игрового EXE и проверка исходного кода. В изолированном
-EXE выполнены настоящий регистратор истории, расчёт траектории питания
-и обработчик доступности зова. Полная сессия в двух окнах не проверялась:
-нужен ручной тест зова гостя, имени между эволюциями, влияния его еды,
-сохранения только хостом и автоматического выхода гостя.
-
----
-
-# Beta 12 — 25 сентября 2026 (протокол 7)
-
-- Исправлено найденное рассогласование рта второго игрока: поверх исходной
-  игровой клетки отображалось существо хоста, но свойства питания оставались
-  от старого существа. Теперь после загрузки и подготовки общей модели
-  обновляются настоящее тело аватара и ключ существа в данных кампании.
-- Старые графика и физические узлы заменяются штатными функциями игры.
-  Сам объект игрока, здоровье, прогресс и запись столкновений сохраняются.
-  До готовности общей модели используется прежняя временная копия внешности.
-- Добавлены проверки реальных нативных функций на изолированных данных:
-  освобождение старого тела без удаления игрока и переключение способностей
-  рта через ключ существа кампании. Проверяются полные сигнатуры функций.
-- Сохранены исправления вылетов Beta 9–11. Протокол 7 не менялся;
-  установленный сервер Beta 9–11 можно оставить.
-
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-12-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Обновите DLL у **обоих** игроков.
-
-Проверено: сборка DLL, 116 серверных проверок, 93 нативные проверки,
-75 проверок функций игрового исполняемого файла и проверка исходного кода.
-Подбор красных кусочков мяса вторым игроком с плотоядным ртом ещё требует
-проверки в двух окнах игры; автоматические тесты не воспроизводят целую сессию.
+Two-window verification is needed for joining a grown host, guest movement,
+suppression of old notifications, guest death, and guest NPC kills. All reported
+gameplay symptoms, including the sphere in the screenshot, have not yet been
+confirmed resolved in an interactive session. Update both DLLs; the Beta 14 server
+is compatible. Run `Start-TwoSpore.ps1` with both games closed.
 
 ---
 
-# Beta 11 — 25 сентября 2026 (протокол 7)
+# Beta 14 — September 26, 2026 (protocol 9)
 
-- Уточнена защита перехода в редактор из Beta 10: если сетевой флаг редактора
-  пришёл раньше локальной смены режима, клетка напарника и копии NPC удаляются
-  из ещё активного мира штатно. После ухода локального окна из стадии «Клетка»
-  остаётся только сброс ссылок без обращения к освобождённому пулу.
-- Протокол 7 не менялся. Сервер из Beta 9–11 совместим; в архиве есть сервер
-  для полной установки. Все остальные функции Beta 9 сохранены.
+- Species names are written directly to the model: native `cEditor::SetName`
+  ignored changes when the campaign name was nonempty. Owner saves also write
+  the name to `Games/Game0/SporeCoop-name-<gameID>.txt`; loading sends it with the
+  initial progress of a new invitation.
+- After loading a save, the guest applies shared growth and waits for body
+  readiness before placement beside the owner. Physics nodes, the movement
+  target, and camera position are updated.
+- Lethal guest hits reach the owner, which invokes native NPC death with meat
+  generation and animation. Repeated death does not generate a second drop.
+- Cooperative avatar death replaces only the avatar. The shared NPC, food, and
+  spawner pools are retained. Loading, single-player play, and live-avatar resets
+  continue to use the full native procedure.
+- Worlds copied to the second profile at launch are hidden while building its
+  saved-game menu. The files and campaign records remain available to invitations.
+  New worlds created in the second window after launch are not filtered.
 
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-11-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Обновите DLL у **обоих** игроков.
+Update both DLLs and the server together. Run `Start-TwoSpore.ps1` with both games
+closed. A previously lost name cannot be recovered automatically: set it in the
+editor and save the world as its owner. Preparing and backing up the second
+profile remain part of the existing local workflow.
 
-Проверено: сборка DLL, 116 серверных проверок, 93 нативные проверки,
-63 проверки функций игрового исполняемого файла и проверка исходного кода.
-Реальный переход в редактор и остальные сценарии требуют проверки в двух окнах.
+Validation: DLL/server builds, 134 server checks, 98 client checks, and 101
+executable-function checks, including real NPC death and reproduction of the
+native editor's refusal to change a campaign name. Two-window scenarios remain
+unverified: reinviting after loading, meat from guest kills, owner death without
+NPC restoration, name persistence across saving/restarting, and hiding copied
+worlds from the second window's menu.
 
 ---
 
-# Beta 10 — 25 сентября 2026 (протокол 7)
+# Beta 13 — September 26, 2026 (protocol 8)
 
-- Исправлен новый вылет от 21:05:05 при переходе из стадии «Клетка» в
-  редактор. Во время смены режима мод пытался найти и удалить сетевую клетку
-  по индексу в уже освобождаемом нативном пуле. При уходе из игрового мира
-  мод теперь сбрасывает ссылки на сетевого игрока, копию внешности и NPC без
-  обращения к этому пулу. Во время активной стадии штатное удаление остаётся.
-- Причина установлена по PDB опубликованной Beta 9 и машинному коду игры:
+- Guest mating call: local NPC cleanup no longer deletes the native mate created
+  by the call button. The game still controls movement and mating; editor entry
+  is shared by both players.
+- The species name is restored on the next editor visit. An empty cached-model
+  name does not erase the shared name. Active input is written to the model
+  before confirmation and is not overwritten while the UI closes.
+- Guest plant and meat consumption events feed the shared History. Their diet
+  counters are sent and applied first; the host then invokes the native history
+  recorder. Duplicate events and packets for another world are rejected. Plant
+  gains replay with the correct diet type, including native cell growth.
+- Returning to the menu as world owner ends the session even if the game window
+  stays open. The guest returns to the galaxy menu when the owner leaves or the
+  connection is lost. Editor entry and loading do not count as leaving.
+- Only the invitation owner writes the world. Guest save protection remains
+  active throughout the exit transition; ending the world does not access the
+  old cell pool. Saving a creature in the editor is still allowed.
+- Retains Beta 12 changes and Beta 9–11 crash fixes.
+
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-13-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update **both DLLs and the server**. Protocol 8 is incompatible with Beta 1–12.
+
+Validated DLL/server builds, 128 server checks, 98 native checks, 89 executable-
+function checks, and source checks. The isolated executable runs the real history
+recorder, diet-path calculation, and mating-call availability handler. A full
+two-window session has not been tested. Guest mating calls, names across
+evolutions, guest diet contributions, owner-only saving, and automatic guest
+exit need manual verification.
+
+---
+
+# Beta 12 — September 25, 2026 (protocol 7)
+
+- Fixed the identified guest-mouth mismatch: the host creature was displayed
+  over the guest's original cell, while feeding abilities still came from the
+  old creature. After the shared model loads and is prepared, the mod now updates
+  the actual avatar body and the campaign's creature key.
+- Native functions replace the old graphics and physics nodes. The player object,
+  health, progress, and collision record are preserved. The existing temporary
+  appearance proxy remains in use until the shared model is ready.
+- Added tests of real native functions on isolated data: releasing the old body
+  without deleting the player and switching mouth abilities through the campaign
+  creature key. Full function signatures are verified.
+- Retains Beta 9–11 crash fixes. Protocol 7 is unchanged; the installed Beta 9–11
+  server can be kept.
+
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-12-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update the DLLs for **both** players.
+
+Validated the DLL build, 116 server checks, 93 native checks, 75 executable-
+function checks, and source checks. Guest collection of red meat pieces with a
+carnivorous mouth still needs two-window verification; automated tests do not
+reproduce an entire session.
+
+---
+
+# Beta 11 — September 25, 2026 (protocol 7)
+
+- Refined Beta 10's editor-transition protection. If the network editor flag
+  arrives before the local mode change, the peer cell and NPC replicas are
+  removed normally from the still-active world. Once the local window leaves
+  Cell, only references are reset, without accessing the freed pool.
+- Protocol 7 is unchanged. The Beta 9–11 server is compatible; a server is included
+  for a complete installation. All other Beta 9 features are retained.
+
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-11-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update the DLLs for **both** players.
+
+Validated the DLL build, 116 server checks, 93 native checks, 63 executable-
+function checks, and source checks. Actual editor transitions and other scenarios
+still require verification in two windows.
+
+---
+
+# Beta 10 — September 25, 2026 (protocol 7)
+
+- Fixed the new 21:05:05 crash during the Cell-to-editor transition. During the
+  mode change, the mod tried to find and remove a network cell by index from a
+  native pool being freed. On leaving the world, it now resets peer, appearance-
+  proxy, and NPC references without accessing that pool. Normal removal remains
+  enabled during active gameplay.
+- The cause was identified using the published Beta 9 PDB and game machine code:
   `CoopUpdate` → `RemoveRemoteCell` → `cObjectPool::GetIfNotDeleted`.
-  Это исправление относится к данной сигнатуре; проверка перехода в двух
-  окнах игры пока не выполнена.
-- Остальные функции Beta 9 сохранены. Протокол не менялся; сервер включён в
-  архив для полной установки, но совместим с сервером Beta 9.
+  This fix addresses that signature; the transition has not yet been tested in
+  two game windows.
+- Other Beta 9 features are retained. Protocol is unchanged; the archive includes
+  a server for a complete installation, compatible with the Beta 9 server.
 
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-10-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Обновите DLL у **обоих** игроков.
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-10-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update the DLLs for **both** players.
 
-Проверено: сборка DLL, 116 серверных проверок, 93 нативные проверки,
-63 проверки функций игрового исполняемого файла и проверка исходного кода.
-Реальная игра, сохранения и миниатюры истории требуют проверки в двух окнах.
-
----
-
-# Beta 9 — 25 сентября 2026 (протокол 7)
-
-- Добавлена защита от конкретного вылета из двух свежих отчётов: штатный
-  загрузчик пытался читать отсутствующую модель клетки по нулевому указателю.
-  Проверяется загрузка перед созданием сетевой копии и в самой нативной функции,
-  включая отложенную загрузку NPC. Отсутствующая модель пропускается; повторные
-  попытки создания ограничены. Это не гарантия отсутствия любых других вылетов.
-- Сетевые объекты без замены модели сохраняют исходный тип вложения: обычный
-  NPC больше не превращается в PlayerCreature только из-за сетевого создания.
-- Стрелка к напарнику за пределами экрана стала ярко-жёлтой и заново
-  присоединяется к текущему интерфейсу после перехода через редактор.
-- Добавлена передача нативной ленты «История» владельца мира: события,
-  поколения и значения эволюционной шкалы. Гость получает целый снимок ленты;
-  перед открытием истории применяются данные хоста. Сетевые указатели не
-  передаются; ключи общей модели связываются с локальными ключами миниатюр.
-- Запись мира, подготовка его файлов и завершающая обработка сохранения
-  пропускаются у приглашённого игрока. Владелец определяется отправителем
-  приглашения, независимо от сетевой роли host/guest. Защита остаётся после
-  обрыва соединения до выхода из мира. Обычная одиночная игра и сохранение
-  самого существа в редакторе не блокируются.
-- Сохранены ранее добавленные синхронизация игроков и NPC, общий рост,
-  ДНК, детали и задания, редактор/имя вида/подтверждение эволюции,
-  привязка внешности после эволюции и передача анимаций еды.
-
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-9-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Нужно обновить **обе DLL и сервер**: протокол 7 несовместим с Beta 1–8.
-
-Проверено: сборки DLL и сервера, 116 серверных проверок, 93 нативные
-проверки, 63 проверки функций игрового исполняемого файла, проверки исходного
-кода. Добавлены проверки владельца сохранения, отключения гостя, ограничений
-и структуры ленты истории, порядка сетевых пакетов и адресов нативных функций.
-
-Ограничения: интерактивная проверка в двух окнах, «Сохранить и выйти» и
-миниатюры истории после нескольких эволюций ещё не выполнены. История
-обновляется перед открытием; уже открытое окно нужно переоткрыть для новых
-событий. Если нужной модели нет в локальных ресурсах, соответствующее существо
-может не отобразиться вместо аварийного выхода. Это предварительный релиз.
-
-Диагностика: `%TEMP%\SporeCoop.Probe.log`, строки `Prevented native E83EC8`,
-`Guest campaign save skipped`, `Verified native history recorder`.
+Validated the DLL build, 116 server checks, 93 native checks, 63 executable-
+function checks, and source checks. Gameplay, saves, and History thumbnails need
+two-window verification.
 
 ---
 
-# Beta 8 — 25 сентября 2026 (протокол 6)
+# Beta 9 — September 25, 2026 (protocol 7)
 
-- Исправлен путь подмены внешности обоих игроков у гостя после общей эволюции.
-  В журнале Beta 7 подтверждение сработало, но сохранённая локальная модель
-  не совпала побайтово с моделью хоста. Мод создал копии через отдельный кэш
-  и скрыл собственное существо гостя, хотя сохранённые портреты у обоих были одинаковыми.
-- После применения итоговой общей модели и успешного штатного сохранения мод
-  запоминает её связь с новым локальным ключом существа. Напарник использует эту
-  уже сохранённую модель; локальный персонаж не заменяется копией из чужого кэша.
-  Перед этим проверяется, что сохранение и игровой аватар получили одинаковый ключ.
-- Игрок, автоматически завершивший редактор, передаёт обратно ту же итоговую
-  модель, а не её побайтово изменённый результат локального сохранения. Это
-  сохраняет узнавание внешности и когда первым галочку нажимает гость.
-- Связь действует только для конкретного мира, подключения, сеанса эволюции,
-  итоговой версии и содержимого модели. Новая модель, другой аватар, отмена,
-  новая эволюция и переподключение не могут использовать старое подтверждение.
-- Сохранены общая галочка, имя вида, синхронизация ДНК/частей и жёлтая стрелка.
+- Added protection for the specific crash in two recent reports: the native
+  loader tried to read a missing cell model through a null pointer. Loading is
+  checked before creating a network replica and inside the native function,
+  including deferred NPC loading. Missing models are skipped and creation
+  retries are limited. This does not guarantee protection against other crashes.
+- Network objects without a model override retain their original attachment
+  type. Ordinary NPCs no longer become PlayerCreature merely because they were
+  created through networking.
+- The off-screen peer arrow is now bright yellow and reattaches to the current
+  UI after transitions through the editor.
+- Added synchronization of the owner's native History timeline: events,
+  generations, and evolution-scale values. The guest receives a complete
+  snapshot, applied before History opens. Pointers are not transmitted; shared
+  model keys are mapped to local thumbnail keys.
+- Invited players skip world writes, file preparation, and save cleanup. The
+  owner is the invitation sender, regardless of host/guest network role. The
+  protection survives disconnects until the world is left. Ordinary single-player
+  play and saving a creature in the editor are not blocked.
+- Retains player/NPC synchronization, shared growth, DNA, parts and missions,
+  the editor, species name, evolution confirmation, appearance binding after
+  evolution, and feeding-animation synchronization.
 
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-8-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Обновите DLL у **обоих** игроков. Сервер включён, протокол остался равным 6.
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-9-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update **both DLLs and the server**: protocol 7 is incompatible with Beta 1–8.
 
-Проверено: сборка DLL, 110 серверных проверок, 87 нативных проверок,
-53 проверки игрового исполняемого файла и проверки исходного кода.
-Добавлены 19 проверок связи итоговой модели с локальным сохранением и её
-сброса при смене состояния. Визуальная проверка исправления в двух запущенных
-окнах ещё не выполнена; это экспериментальный предварительный релиз.
+Validated DLL/server builds, 116 server checks, 93 native checks, 63 executable-
+function checks, and source checks. Added coverage for save ownership, guest
+disconnects, timeline limits and structure, packet ordering, and native addresses.
 
-Диагностика: `%TEMP%\SporeCoop.Probe.log`, строки
+Limitations: interactive two-window verification, Save and Quit, and History
+thumbnails after several evolutions have not been tested. History updates before
+opening; reopen an already visible window to see new events. When a required
+model is missing locally, its creature may remain invisible instead of crashing.
+This is a prerelease.
+
+Diagnostics: `%TEMP%\SporeCoop.Probe.log`; look for `Prevented native E83EC8`,
+`Guest campaign save skipped`, and `Verified native history recorder`.
+
+---
+
+# Beta 8 — September 25, 2026 (protocol 6)
+
+- Fixed the path that substituted both players' appearance on the guest after
+  shared evolution. Beta 7 logs showed successful confirmation, but the saved
+  local model differed byte-for-byte from the host model. The mod created
+  separate cached copies and hid the guest avatar even though both saved
+  portraits looked identical.
+- After applying the final shared model and successfully saving it natively,
+  the mod remembers its relationship to the new local creature key. The peer
+  uses that saved model; the local character is not replaced by a foreign-cache
+  proxy. The save and avatar must first be verified to have matching keys.
+- The player whose editor finishes automatically sends the same final shared
+  model back, rather than the byte-modified result of the local save. This keeps
+  appearance recognition working when the guest confirms first, too.
+- The binding applies only to a specific world, connection, evolution session,
+  final revision, and model content. New models, different avatars, cancellation,
+  another evolution, and reconnection cannot reuse an old confirmation.
+- Retains shared confirmation, species names, DNA/part synchronization, and the
+  yellow arrow.
+
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-8-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update the DLLs for **both** players. The server is included; protocol remains 6.
+
+Validated the DLL build, 110 server checks, 87 native checks, 53 executable checks,
+and source checks. Added 19 checks for binding the final model to its local save
+and resetting that binding on state changes. The fix has not been visually
+verified in two running windows; this is an experimental prerelease.
+
+Diagnostics: `%TEMP%\SporeCoop.Probe.log`; look for
 `Shared evolution appearance: native save bound to the final shared editor revision`
-и `Shared evolution appearance: reusing the natively saved avatar for the peer`.
+and `Shared evolution appearance: reusing the natively saved avatar for the peer`.
 
 ---
 
-# Beta 7 — 24 сентября 2026 (протокол 6)
+# Beta 7 — September 24, 2026 (protocol 6)
 
-- Исправлена конкретная причина отказа автоматической галочки в Beta 6:
-  EditorUI ожидает активацию компонента (`0x287259F6`), а мод отправлял
-  обычный клик (`0x17`). Теперь передаётся правильное событие с командой
-  сохранения `0x102`. При завершении любым игроком второй получает итоговую
-  модель, имя и ДНК, дожидается готовности редактора и вызывает штатное сохранение.
-- Наблюдение за локальным подтверждением и отменой также использует событие,
-  которое обрабатывает сам EditorUI. Сохраняются проверки готовности и защита
-  от запоздалого завершения предыдущего сеанса.
-- Стрелка за пределами экрана теперь жёлтая со светлой обводкой.
-- Сохранены предыдущие изменения синхронизации игроков, внешности, общего
-  прогресса, частей, имени и ДНК, а также сглаживание движения.
+- Fixed the specific automatic-confirmation failure in Beta 6: EditorUI expects
+  component activation (`0x287259F6`), while the mod sent a normal click (`0x17`).
+  It now sends the correct event with save command `0x102`. When either player
+  finishes, the other receives the final model, name, and DNA, waits for editor
+  readiness, and invokes the native save.
+- Local confirmation and cancellation are observed through the same event that
+  EditorUI handles. Readiness checks and protection against delayed completion
+  of an earlier session remain in place.
+- The off-screen arrow is now yellow with a light outline.
+- Retains previous synchronization of players, appearance, shared progress,
+  parts, names, and DNA, as well as movement smoothing.
 
-Установка: закройте оба окна игры, распакуйте
-`spore-multiplayer-mod-beta-7-windows.zip` и запустите `Start-TwoSpore.ps1`.
-DLL нужно обновить у **обоих** игроков. Сервер входит в архив; протокол 6
-не изменился.
+Installation: close both game windows, extract
+`spore-multiplayer-mod-beta-7-windows.zip`, and run `Start-TwoSpore.ps1`.
+Update the DLLs for **both** players. The server is included; protocol 6 is unchanged.
 
-Проверено: сборка DLL, 110 серверных проверок, 68 нативных проверок,
-53 проверки игрового исполняемого файла и проверки исходного кода.
-Новый тест исполняет настоящий обработчик EditorUI и его переключатель команд
-на изолированных данных: старое событие отклоняется, новое доходит до входа
-функции сохранения. Проверены отказ при скрытом/неактивном/занятом редакторе
-и успешная повторная попытка после готовности. Только сама функция сохранения
-заменена тестовым регистратором, поэтому тест не запускает игру и не меняет
-сохранения. Полный выход в двух игровых окнах в этой версии ещё не проверен.
+Validated the DLL build, 110 server checks, 68 native checks, 53 executable checks,
+and source checks. A new test runs the real EditorUI handler and command switch
+on isolated data: the old event is rejected, while the new event reaches the save
+entry. It checks rejection for hidden, inactive, or busy editors and a successful
+retry once ready. Only the save function is replaced by a test recorder, so the
+test does not start the game or modify saves. Complete exit from both editors
+has not yet been tested in two game windows for this version.
 
-Диагностика: `%TEMP%\SporeCoop.Probe.log`, строка
-`remote finish activation handled=1`. Она означает принятие команды обработчиком,
-а не подтверждение окончания всей процедуры сохранения.
+Diagnostics: `%TEMP%\SporeCoop.Probe.log`; `remote finish activation handled=1`
+means the handler accepted the command, not that the entire save has completed.
 
 ---
 
-# Beta 6 — 24 сентября 2026 (протокол 6)
+# Beta 6 — September 24, 2026 (protocol 6)
 
-- Исправлен путь автоматической галочки. В журнале Beta 5 событие отправлялось,
-  но хост оставался в редакторе: сообщение уходило дочерней кнопке. Теперь команда
-  с её штатным идентификатором передаётся обработчику EditorUI. Если обработчик
-  ещё занят, попытка откладывается; итоговая модель должна загрузиться до вызова.
-- Во время выхода из эволюции новые координаты не используют модель из старого
-  пакета внешности. После общей эволюции, если полная модель совпадает с локальным
-  аватаром, напарник использует его уже загруженный облик вместо нового кэша
-  под чужим ключом. Это устраняет два обнаруженных пути подмены внешности.
-- Добавлена бирюзовая стрелка у края экрана в направлении напарника, когда тот
-  выходит из кадра. Она учитывает камеру, масштаб и пропорции окна, не перехватывает
-  мышь, исчезает при возвращении напарника, паузе, редакторе и потере связи.
+- Fixed the automatic-confirmation path. Beta 5 logs showed the event being sent,
+  but the host remained in the editor because the message went to a child button.
+  The native command ID is now sent to EditorUI. If the handler is busy, the
+  attempt waits; the final model must load before invocation.
+- During evolution exit, new coordinates no longer use a model from an old
+  appearance packet. After shared evolution, when the complete model matches
+  the local avatar, the peer reuses that loaded appearance instead of a new cache
+  under a foreign key. This addresses two identified substitution paths.
+- Added a turquoise arrow at the screen edge pointing toward an off-screen peer.
+  It accounts for the camera, scale, and aspect ratio, does not capture the mouse,
+  and hides when the peer returns, during pause/editor use, or on disconnect.
 
-Обновите DLL у **обоих** игроков. Распакуйте
-`spore-multiplayer-mod-beta-6-windows.zip`, закройте оба окна игры и запустите
-`Start-TwoSpore.ps1`. Сервер включён в архив; протокол остался равным 6.
+Update the DLLs for **both** players. Extract
+`spore-multiplayer-mod-beta-6-windows.zip`, close both game windows, and run
+`Start-TwoSpore.ps1`. The server is included; protocol remains 6.
 
-Проверено: сборка DLL, 110 серверных проверок, 68 нативных проверок и 39 проверок
-игрового исполняемого файла. Проекция стрелки проверена обратным преобразованием
-через настоящую функцию камеры SPORE, включая поворот и точки за экраном.
-Проверены края, углы, широкое и вертикальное окно, некорректная матрица камеры.
+Validated the DLL build, 110 server checks, 68 native checks, and 39 executable
+checks. Arrow projection is checked by reversing through SPORE's real camera
+function, including rotation and off-screen points. Tests cover edges, corners,
+wide and portrait windows, and invalid camera matrices.
 
-Проверка в двух окнах начата, но пользователь остановил управление клавишей Esc
-до проверки завершения редактора и стрелки в игровом процессе. Исправления
-галочки, внешности и отображение стрелки ещё требуют проверки в живой сессии.
-Диагностика: `%TEMP%\SporeCoop.Probe.log`, строки
-`native EditorUI accepted remote finish command` и
+Two-window testing started, but the user stopped control with Esc before testing
+editor completion and the arrow during gameplay. Confirmation, appearance, and
+arrow rendering still need a live session. Diagnostics: `%TEMP%\SporeCoop.Probe.log`;
+look for `native EditorUI accepted remote finish command` and
 `Peer appearance matches the live avatar; reusing its complete local skin`.
 
 ---
 
-# Beta 5 — 24 сентября 2026 (протокол 6)
+# Beta 5 — September 24, 2026 (protocol 6)
 
-- Название вида передаётся от любого игрока вместе с версией существа и остатком
-  ДНК. Обновляются поле ввода, подпись и имя модели, которое сохраняет игра.
-  Поддерживаются кириллица, кавычки и очистка названия.
-- После успешного выхода через галочку второй редактор получает итоговое тело,
-  название и ДНК, ждёт загрузки частей и записи истории, затем вызывает штатную
-  кнопку подтверждения. Проверки самой игры при этом сохраняются.
-- Отмена редактора отличается от подтверждения. Повторное завершение и сообщение
-  от предыдущего посещения редактора не закрывают новый сеанс и не заменяют модель.
-- Устранён повторный вход гостя в редактор во время ожидания ответа сервера о выходе.
-- Сохранены изменения предыдущих версий: общий прогресс и детали, обмен моделью
-  и ДНК в редакторе, сглаживание игроков/NPC и воспроизведение анимаций видимого рта.
+- Either player can send a species name with the creature revision and remaining
+  DNA. The input field, caption, and model name saved by the game are updated.
+  Cyrillic, quotation marks, and clearing a name are supported.
+- After successful confirmation, the other editor receives the final body,
+  name, and DNA, waits for parts to load and history to commit, then invokes the
+  native confirmation button. The game's own validation remains in place.
+- Editor cancellation is distinguished from confirmation. Repeated completion
+  or messages from an earlier visit cannot close a new session or replace its model.
+- Prevented guest reentry while waiting for the server's editor-exit response.
+- Retains shared progress and parts, model/DNA exchange in the editor, player/NPC
+  smoothing, and animation of the visible mouth.
 
-Установка: закройте оба окна игры, обновите DLL у **обоих** игроков и сервер.
-Распакуйте `spore-multiplayer-mod-beta-5-windows.zip` и запустите `Start-TwoSpore.ps1`.
-Протокол 6 несовместим с Beta 1–4.
+Installation: close both game windows and update **both** DLLs and the server.
+Extract `spore-multiplayer-mod-beta-5-windows.zip` and run `Start-TwoSpore.ps1`.
+Protocol 6 is incompatible with Beta 1–4.
 
-Проверено: сборка DLL и сервера, 110 серверных проверок, 67 нативных проверок,
-33 проверки игрового исполняемого файла, проверки исходного кода и соединение
-без движения в течение 17 секунд. Сценарий с названием и галочкой в двух игровых
-окнах ещё не проверен; это экспериментальный предварительный релиз.
+Validated DLL/server builds, 110 server checks, 67 native checks, 33 executable
+checks, source checks, and a 17-second idle connection. Names and confirmation
+have not yet been tested in two game windows; this is an experimental prerelease.
 
-Для проверки в игре: измените название в каждом окне по очереди, затем завершите
-редактор галочкой сначала у хоста, а при следующей эволюции — у гостя. Оба окна
-должны выйти с одинаковым названием и существом. Журнал: `%TEMP%\SporeCoop.Probe.log`,
-строка `EditorSync: remote final revision loaded; native Accept dispatched once.`
-
----
-
-# Beta 4 — 23 сентября 2026 (протокол 5)
-
-Исправление регрессии Beta 3. В журнале подтверждено: проверка цены отклоняла
-общую модель, оставляя у приглашённого пустое тело и блокируя дальнейшие правки.
-
-- Удалён пересчёт стоимости по свойствам деталей. Остаток ДНК теперь берётся из
-  штатной истории редактора и передаётся вместе с моделью и номером её версии.
-- Вход в редактор, установка/удаление деталей и отмена/повтор используют общий
-  снимок модели и бюджета. Старая версия не может перезаписать новый остаток ДНК.
-- При одновременных независимых правках локальные списания/возвраты добавляются
-  к полученному бюджету. Подтверждённые и одинаковые правки не оплачиваются дважды.
-- Вызов анимации рта заменён: он обращается к видимым AnimatedCreature, включая
-  PlayerCreature и RandomCreature. Предыдущий вызов движка пропускал эти типы
-  вложенных моделей. Отправитель читает также фактическую анимацию видимого рта.
-- Сохранены сглаживание игрока и предыдущие исправления общего мира и прогресса.
-
-Обновите DLL у ОБОИХ игроков и сервер: протокол 5 несовместим с Beta 1–3.
-Закройте оба окна, распакуйте `spore-multiplayer-mod-beta-4-windows.zip` и
-запустите `Start-TwoSpore.ps1`.
-
-Проверено: сборка DLL/сервера, 100 серверных проверок, 63 нативные проверки,
-33 проверки игрового исполняемого файла и проверки исходного кода. Дополнительные
-регрессии покрывают бюджет 16 → 6, возврат ДНК, старые/неполные пакеты и
-одновременные правки. Проверка в двух окнах начата, но управление остановлено
-пользователем клавишей Esc до входа в игровой мир. Поэтому поведение редактора,
-ДНК и рта в живой игре в этом релизе пока не подтверждено.
-
-Диагностика: `%TEMP%\SporeCoop.Probe.log`, строки `EditorSync` и `MouthSync`.
+To verify in-game, rename the species in each window in turn, then finish the
+editor as the host and, on the next evolution, as the guest. Both windows should
+exit with the same name and creature. Diagnostics: `%TEMP%\SporeCoop.Probe.log`;
+look for `EditorSync: remote final revision loaded; native Accept dispatched once.`
 
 ---
 
-# Beta 3 — 23 сентября 2026 (протокол 4)
+# Beta 4 — September 23, 2026 (protocol 5)
 
-## ДНК в общем редакторе
+Fixes a Beta 3 regression. Logs confirmed that price validation rejected the shared
+model, leaving the invited player with an empty body and blocking further edits.
 
-- При получении изменений второго игрока теперь обновляется штатный бюджет
-  редактора: установка деталей списывает ДНК, удаление и отмена возвращают её.
-  Исправляется сценарий со скриншота: после шипов в одном окне оставалось 6,
-  а в другом по-прежнему отображалось 16.
-- Симметричная пара считается одной покупкой. Повторный снимок модели и смена
-  цвета не списывают ДНК ещё раз. История редактора сохраняет обновлённый бюджет.
-- Цена берётся из свойств деталей до загрузки новой модели: её ещё не
-  загруженные поля стоимости не используются. При первом входе исходное тело
-  не оплачивается повторно; учитываются правки, пришедшие во время перехода.
-- Объединённая правка, на которую не хватает ДНК, не применяется: локальная
-  модель сохраняется. Одновременные покупки при почти пустом бюджете могут
-  потребовать удаления одной детали перед повторной синхронизацией.
+- Removed cost recalculation from part properties. Remaining DNA is read from
+  native editor history and sent with the model and its revision.
+- Editor entry, adding/removing parts, and undo/redo use a shared model/budget
+  snapshot. Older revisions cannot overwrite a newer DNA balance.
+- Concurrent independent edits add local charges/refunds to the received budget.
+  Acknowledged and identical edits are not charged twice.
+- Replaced the mouth-animation call with one targeting visible AnimatedCreature
+  objects, including PlayerCreature and RandomCreature. The previous engine
+  call skipped those nested model types. The sender also reads the actual
+  animation of the visible mouth.
+- Retains player smoothing and previous shared-world/progress fixes.
 
-## Плавность и анимация
+Update **both** players' DLLs and the server: protocol 5 is incompatible with
+Beta 1–3. Close both windows, extract `spore-multiplayer-mod-beta-4-windows.zip`,
+and run `Start-TwoSpore.ps1`.
 
-- Положение и полный поворот второго игрока интерполируются каждый кадр с
-  буфером 75 мс между сетевыми пакетами. При телепорте, смене тела или разрыве
-  связи история сбрасывается. Экстраполяция за последнее известное положение
-  не используется; собственное управление остаётся без этого буфера.
-- Добавлен экспериментальный запуск штатных анимаций еды и жевания на сетевой
-  клетке и визуальной копии гостя. Повторные пакеты не перезапускают один жест
-  каждый кадр. Это визуальная передача; пища не начисляется повторно.
-- Вызов анимации проверяется по сигнатуре поддерживаемого игрового файла.
+Validated DLL/server builds, 100 server checks, 63 native checks, 33 executable
+checks, and source checks. Additional regressions cover the 16 → 6 budget change,
+DNA refunds, old/incomplete packets, and concurrent edits. Two-window testing
+started, but the user stopped control with Esc before entering the world. Editor,
+DNA, and mouth behavior remain unverified in live gameplay for this release.
 
-## Проверки и установка
-
-Собраны DLL и сервер. Пройдены 94 серверные проверки, 59 верхнеуровневых
-нативных проверок с дополнительными сценариями ДНК, симметрии, анимации и
-покадрового сглаживания; 33 проверки игрового исполняемого файла, включая
-1000 кадров перемещения; проверки исходного кода и 17-секундного простоя сети.
-Эти проверки не заменяют игру в двух окнах: новые изменения ДНК, рта и
-плавности пока не подтверждены интерактивным игровым тестом.
-
-Закройте оба окна SPORE, распакуйте `spore-multiplayer-mod-beta-3-windows.zip`
-и запустите `Start-TwoSpore.ps1`. DLL нужно обновить у обоих игроков.
-В релиз также входят все изменения Beta 2: общий мир, рост, задания и детали,
-переход в редактор, передача внешности и правок, сглаживание NPC и уведомление
-об уходе хоста. Их подробное описание сохранено ниже.
-
-Журнал: `%TEMP%\SporeCoop.Probe.log`; строки `EditorSync: shared budget`
-показывают применённую стоимость и остаток ДНК.
+Diagnostics: `%TEMP%\SporeCoop.Probe.log`; look for `EditorSync` and `MouthSync`.
 
 ---
 
-# Beta 2 — 23 сентября 2026 (протокол 4)
+# Beta 3 — September 23, 2026 (protocol 4)
 
-Экспериментальный релиз для клеточного этапа SPORE Galactic Adventures. Обновите
-DLL в обоих окнах и сервер одновременно. С Beta 1 / протоколом 3 несовместим.
+## DNA in the shared editor
 
-## Синхронизация игроков и мира
+- Receiving the other player's changes now updates the native editor budget:
+  adding parts spends DNA; removing parts and undoing purchases refund it. This
+  addresses the screenshot where adding spikes left one window at 6 and the
+  other still at 16.
+- A symmetric pair counts as one purchase. Repeated model snapshots and color
+  changes do not spend DNA again. Editor history preserves the updated budget.
+- Prices come from part properties before the new model loads, without reading
+  its still-unloaded cost fields. The initial body is not charged again on first
+  entry; edits received during the transition are accounted for.
+- A merged edit that exceeds the DNA budget is not applied; the local model is
+  retained. Concurrent purchases with almost no DNA remaining may require
+  removing a part before synchronization can resume.
 
-- Перемещение и поворот сетевых клеток используют штатные функции движка,
-  которые двигают физические узлы вместе с видимой моделью. Исправлен путь,
-  возвращавший клетку к старым координатам после обновления физики.
-- При росте учитываются масштаб и смещение мира относительно камеры каждого
-  игрока. Игроки и объекты передаются в общей системе координат.
-- Передаются полная внешность, цвета, выбранная модель и размер существа.
-  Скрытая исходная клетка восстанавливается при потере её визуальной копии.
-- Убрано ошибочное включение состояния смерти у сетевых копий. Визуальные
-  двойники игроков исключаются из столкновений штатной функцией движка.
-- Расширена передача объектов мира: NPC, еда, детали и декорации; добавлены
-  здоровье, анимация, состояние смерти, запросы урона и удаления объектов.
-  Итоговые изменения мира обрабатывает владелец приглашения.
-- Добавлено сглаживание положения и поворота NPC между снимками каждые 100 мс.
-  После телепорта или долгого перерыва история сглаживания сбрасывается.
+## Smoothing and animation
 
-## Общий прогресс и редактор
+- Network-cell position and full rotation are interpolated each frame with a
+  75 ms packet buffer. Teleports, body changes, and disconnects reset the history.
+  There is no extrapolation beyond the last known position; local input does
+  not use this buffer.
+- Added experimental native feeding and chewing animation on network cells and
+  the guest's appearance proxy. Repeated packets do not restart the same gesture
+  every frame. This is visual synchronization; food is not credited again.
+- The animation call is checked against the supported executable signature.
 
-- Прирост еды, находки и задания учитываются с подтверждением событий, чтобы
-  старый снимок не стирал локальное достижение и не начислял его повторно.
-- Применение общего прогресса вызывает штатные рост, уведомление о детали,
-  обновление задания и первую катсцену. Временные актёры катсцены защищены от
-  удаления синхронизацией NPC.
-- Второе окно открывает клеточный редактор через штатный переход кампании.
-  Общая модель явно применяется после входа, устраняя зелёное стартовое тело.
-- Замена модели использует отдельный объект: повторное присоединение текущего
-  объекта очищало его тело. История сохраняется после загрузки деталей.
-- Завершённые правки отправляются из истории редактора, включая отмену и
-  повтор; наведение на ручку детали больше не блокирует передачу.
-- Добавлены версии модели, подтверждения и объединение независимых правок.
-  Исправлен обнаруженный по журналам сбой повторного приглашения: клиент
-  сохранял старую версию, игнорировал новую модель и бесконечно отправлял
-  отклоняемые сервером изменения, поэтому шипы оставались в одном окне.
+## Validation and installation
 
-## Выход и запуск
+Built the DLL and server. Passed 94 server checks, 59 top-level native checks
+with additional DNA, symmetry, animation, and per-frame smoothing scenarios,
+33 executable checks including 1000 movement frames, source checks, and a
+17-second idle connection. These checks do not replace two-window gameplay:
+the DNA, mouth, and smoothing changes have not yet been verified interactively.
 
-- При выходе или краше хоста второму игроку передаётся причина «Хост вышел»;
-  закрытие соединения сохраняет эту причину и очищает сетевое состояние.
-- Усилена проверка путей перед обновлением изолированного второго профиля;
-  резервные копии получают уникальную временную метку.
-- Добавлены журналы готовности редактора, версий, отправленных правок,
-  физических копий, движения и проверок совместимости движка.
+Close both SPORE windows, extract `spore-multiplayer-mod-beta-3-windows.zip`,
+and run `Start-TwoSpore.ps1`. Update both players' DLLs. This release also contains
+all Beta 2 changes: shared world, growth, missions and parts, editor entry,
+appearance/edit transfer, NPC smoothing, and host-departure notification.
+Their detailed description is retained below.
 
-## Проверки и ограничения
+Diagnostics: `%TEMP%\SporeCoop.Probe.log`; `EditorSync: shared budget` reports
+the applied cost and remaining DNA.
 
-Пройдены 94 проверки серверного протокола, 59 проверок нативного клиента,
-32 проверки движка/ABI (включая 1000 перемещений), проверки исходных инвариантов
-и 17-секундное подключение без игрового ввода. DLL и сервер собраны заново.
-Часть тестов содержит дополнительные проверки сглаживания и объединения моделей.
+---
 
-Последний скриншот подтверждает одинаковое исходное существо в редакторах,
-но показывает прежний сбой передачи шипов. Исправление счётчика версий после
-нового приглашения проверено автоматическим тестом; его повторная проверка
-в двух игровых окнах ещё не выполнена. Полная синхронизация боя, катсцен,
-выхода из редактора и переходов между этапами остаётся экспериментальной.
-Игра по сети между разными компьютерами и перенос всего мира не проверены.
+# Beta 2 — September 23, 2026 (protocol 4)
 
-## Установка
+Experimental release for the Cell stage of SPORE Galactic Adventures. Update
+both windows' DLLs and the server together. Incompatible with Beta 1 / protocol 3.
 
-1. Закройте оба окна SPORE.
-2. Распакуйте `spore-multiplayer-mod-beta-2-windows.zip`, сохранив папку `bin`.
-3. Запустите `Start-TwoSpore.ps1`: он устанавливает DLL для обоих лаунчеров.
-4. Загрузите клеточный этап, отправьте приглашение через Esc и примите его.
-5. Проверьте рост, подбор детали, вход в редактор и правки в каждом окне.
+## Player and world synchronization
 
-Требуются SPORE Galactic Adventures, ModAPI Launcher Kit и Windows. Скрипты
-подготовлены для двух локальных окон с игрой в `C:\Games\SPORE Collection` и
-двумя папками лаунчера в `C:\ProgramData`; на другой установке измените пути.
-Нужны также стандартные зависимости Launcher Kit и Visual C++ Runtime x86.
-Журнал: `%TEMP%\SporeCoop.Probe.log`. В архив не входят игра, Launcher Kit,
-пользовательские сохранения и настройки аккаунтов.
+- Network cells move and rotate through native engine functions that update
+  physics nodes with the visible model. Fixed the path that returned cells to
+  their old coordinates after physics updates.
+- Growth accounts for world scale and offset relative to each player's camera.
+  Players and objects are transmitted in shared coordinates.
+- Complete appearance, colors, the selected model, and creature size are sent.
+  A hidden original cell is restored if its appearance proxy loses its graphics.
+- Removed accidental death-state activation on network replicas. Native engine
+  functions exclude visual player duplicates from collisions.
+- Expanded world-object transfer to NPCs, food, parts, and scenery, with health,
+  animation, death state, damage requests, and removal requests. The invitation
+  owner applies authoritative world changes.
+- NPC position and rotation are smoothed between snapshots sent every 100 ms.
+  Teleports or long gaps reset the smoothing history.
+
+## Shared progress and editor
+
+- Food gains, discoveries, and missions use acknowledged events so an older
+  snapshot cannot erase local progress or award it again.
+- Applying shared progress invokes native growth, part notifications, mission
+  updates, and the first cinematic. Temporary cinematic actors are protected
+  from NPC-synchronization cleanup.
+- The second window opens the Cell editor through the native campaign transition.
+  The shared model is explicitly applied after entry, avoiding the green starter body.
+- Model replacement uses a separate object: reattaching the current object
+  cleared its body. History is committed after the parts load.
+- Completed edits are sent from editor history, including undo and redo.
+  Hovering over a part handle no longer blocks transmission.
+- Added model revisions, acknowledgements, and merging of independent edits.
+  Fixed the reinvitation bug identified in logs: the client kept an old revision,
+  ignored the new model, and repeatedly sent edits rejected by the server,
+  leaving spikes visible in only one window.
+
+## Exit and launch
+
+- Host exit or crash sends "Host left" to the other player. Connection teardown
+  preserves that reason and clears network state.
+- Strengthened path validation before updating the isolated second profile.
+  Backups receive unique timestamps.
+- Added diagnostics for editor readiness, revisions, sent edits, physics
+  replicas, movement, and engine compatibility.
+
+## Validation and limitations
+
+Passed 94 server protocol checks, 59 native client checks, 32 engine/ABI checks
+(including 1000 movements), source invariants, and a 17-second connection
+without game input. Rebuilt the DLL and server. Some tests include additional
+checks for smoothing and model merging.
+
+The latest screenshot confirms matching initial creatures in both editors,
+but shows the earlier spike-transfer failure. Resetting the revision counter
+after a new invitation is covered by an automated test; it has not yet been
+retested in two game windows. Full combat, cinematic, editor-exit, and stage-
+transition synchronization remains experimental. Cross-PC play and complete
+world transfer have not been verified.
+
+## Installation
+
+1. Close both SPORE windows.
+2. Extract `spore-multiplayer-mod-beta-2-windows.zip`, keeping the `bin` folder.
+3. Run `Start-TwoSpore.ps1`; it installs the DLLs for both launchers.
+4. Load the Cell stage, send an invitation through Esc, and accept it.
+5. Check growth, part collection, editor entry, and edits in each window.
+
+Requires SPORE Galactic Adventures, ModAPI Launcher Kit, and Windows. The scripts
+target two local windows, a game installation at `C:\Games\SPORE Collection`, and
+two launcher folders under `C:\ProgramData`. Adjust paths for other installations.
+Standard Launcher Kit dependencies and Visual C++ Runtime x86 are also required.
+Diagnostics: `%TEMP%\SporeCoop.Probe.log`. The archive does not include the game,
+Launcher Kit, user saves, or account settings.
 
 ---
 
