@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "../native/CellLifecycleAbi.h"
+#include "../native/CellStageEndAbi.h"
 #include "engine-cell-body.test.h"
 
 namespace LifecycleFixture {
@@ -42,6 +43,17 @@ namespace LifecycleFixture {
     inline void __cdecl DeathAction(int,float) { ++deathActions; }
     inline int nameWrites=0;
     inline void __fastcall SetModelName(void*,void*,const char16_t*) { ++nameWrites; }
+    inline void* endButtonVtable[11]{};
+    inline void** endButton=endButtonVtable;
+    inline std::string endEvents;
+    inline void* __fastcall FindEndControl(void*,void*,unsigned,bool) { return &endButton; }
+    inline void* __fastcall EndControlCast(void* self,void*,unsigned) { return self; }
+    inline void __fastcall EndControlFlag(void*,void*,int,bool) {}
+    inline void __cdecl EndPause(int,bool) {}
+    inline void* __cdecl EndManager() { return nullptr; }
+    inline void __fastcall EndHistory(void*,void*,bool visible) { if (!visible) endEvents+='H'; }
+    inline void __fastcall EndLayout(void*,void*,bool) {}
+    inline void __cdecl BlockLandfall() { endEvents+='T'; }
 }
 
 inline int TestEngineLifecycle(std::uintptr_t base)
@@ -56,6 +68,7 @@ inline int TestEngineLifecycle(std::uintptr_t base)
     VERIFY_LIFECYCLE(KillCell); VERIFY_LIFECYCLE(ResetCellWorld);
     VERIFY_LIFECYCLE(SpawnAvatar); VERIFY_LIFECYCLE(HatchAvatar); VERIFY_LIFECYCLE(BurstCell);
     VERIFY_LIFECYCLE(FinishCinematic);
+    VERIFY_LIFECYCLE(LeaveCellStage); VERIFY_LIFECYCLE(EnterLandEditor);
 #undef VERIFY_LIFECYCLE
     require(MatchesStaticCode(code(0x9f95a0),0x79,0x79,0xe51d1273),"Galaxy saved-world list ABI");
     require(MatchesStaticCode(code(0x175e20),0x2d,0x2d,0x0b40f7fa),"Campaign name setter ABI");
@@ -136,5 +149,31 @@ inline int TestEngineLifecycle(std::uintptr_t base)
     require(nameWrites==0,"Native campaign name override reproduces lost-name bug");
     write(editor,0x1d4,100u);setName(editor.data(),u"1");
     require(nameWrites==1,"Without override native setter reaches model");
+
+    // Run the game's actual History-close callback. Its final-stage branch
+    // must reach our interception point only AFTER hiding History.
+    {
+        const std::size_t relocs[]={0x1,0x56,0x80};
+        require(MatchesMotionCode(code(0xa75b80),0x93,base,0x93,0x19e592be,relocs),"Final History callback ABI");
+        alignas(4) std::array<unsigned char,0x944> ui{};
+        auto** uiGlobal=reinterpret_cast<void**>(code(0x12b3c0c));
+        Restore restoreUI{uiGlobal,*uiGlobal}; *uiGlobal=ui.data();
+        endButtonVtable[3]=reinterpret_cast<void*>(&EndControlCast);
+        endButtonVtable[10]=reinterpret_cast<void*>(&EndControlFlag);
+        Patch control(code(0x410650),reinterpret_cast<void*>(&FindEndControl));
+        Patch pause(code(0xa53640),reinterpret_cast<void*>(&EndPause));
+        Patch historyManager(code(0x73d510),reinterpret_cast<void*>(&EndManager));
+        Patch history(code(0xa44200),reinterpret_cast<void*>(&EndHistory));
+        Patch layout(code(0x410630),reinterpret_cast<void*>(&EndLayout));
+        Patch uiManager(code(0x73d500),reinterpret_cast<void*>(&EndManager));
+        Patch landfall(code(kLeaveCellStageRva),reinterpret_cast<void*>(&BlockLandfall));
+        auto closeHistory=reinterpret_cast<void(__cdecl*)()>(code(0xa75b80));
+        write(game,0x5158,0);endEvents.clear();closeHistory();
+        require(endEvents=="H","Closing ordinary History must not trigger a stage ending");
+        write(game,0x5158,5);endEvents.clear();closeHistory();
+        require(endEvents=="HT","Native final History closes before the landfall interception");
+        int stage=0;std::memcpy(&stage,game.data()+0x5158,4);
+        require(stage==5,"Intercepted ending must not start native landfall state 3");
+    }
     return checks;
 }

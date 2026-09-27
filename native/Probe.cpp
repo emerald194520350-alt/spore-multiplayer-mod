@@ -17,6 +17,7 @@
 #include <Spore/BasicIncludes.h>
 #include <Spore/UTFWin/ButtonDrawableStandard.h>
 #include <Spore/Simulator/SubSystem/GameTimeManager.h>
+#include <Spore/App/cLocaleManager.h>
 
 #include "CoopNet.h"
 #include "CellVisuals.h"
@@ -26,6 +27,8 @@
 #include "CellMotionAbi.h"
 #include "CellBodyAbi.h"
 #include "CellLifecycleAbi.h"
+#include "CellStageEndAbi.h"
+#include "CellStageEndState.h"
 #include "CellReplicaAbi.h"
 #include "CellGrowthAbi.h"
 #include "CellProgressAbi.h"
@@ -2411,6 +2414,8 @@ namespace
     constexpr uint32_t kInvitePlayerButtonID = 0x5C0F1005;
     constexpr uint32_t kInvitePickerCancelButtonID = 0x5C0F1006;
     constexpr uint32_t kSessionEndedOkID = 0x5C0F1013;
+    constexpr uint32_t kCellStageEndMenuID = 0x5C0F1025;
+    CoopSession::CellStageEndState gCellStageEnd;
 
     const char16_t* CoopText(const char16_t* english, const char16_t* russian)
     {
@@ -2428,6 +2433,9 @@ namespace
             if (!window || !message.IsType(UTFWin::kMsgButtonClick)) return false;
             switch (window->GetControlID())
             {
+            case kCellStageEndMenuID:
+                gCellStageEnd.menuRequested=true;
+                return true;
             case kSessionEndedOkID:
                 CoopNet::AcknowledgeSessionEnd();
                 return true;
@@ -3252,12 +3260,15 @@ namespace
         return true;
     }
 
+    #include "CellStageEnd.h"
+
     void CoopUpdate()
     {
         const auto networkState=CoopNet::GetSnapshot();
         auto snapshot = LocalWorldSnapshot(networkState);
         ObserveCampaignName();
         ObserveWorldSaveOwner(snapshot);
+        if (UpdateCellStageEnd(snapshot)) return;
         if (UpdateWorldLifecycle(snapshot)) return;
         UpdateSessionEndedUI(snapshot);
         UpdatePeerIndicator(snapshot);
@@ -3707,7 +3718,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Protocol 9: verified world-growth coordinates and shared object interactions enabled."
+            ? "Version 1 / protocol 10: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
@@ -3728,6 +3739,8 @@ namespace
             : "Cooperative death/respawn hooks unavailable.");
         WriteProbeLog(gEditorSetNameHook ? "Verified campaign editor name override correction."
             : "Campaign editor name override hook unavailable.");
+        WriteProbeLog(gCellStageEndHooks ? "Version 1: verified Cell-stage ending after History; further stages disabled in co-op."
+            : "Cell-stage completion hooks unavailable for this executable.");
     }
 }
 
@@ -3742,6 +3755,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (gModelAttachmentsOriginal) gModelAttachmentsHook=DetourAttach(
             reinterpret_cast<PVOID*>(&gModelAttachmentsOriginal),ModelAttachmentsHook)==NO_ERROR;
         gCampaignSaveHooks = AttachCampaignSaveHooks();
+        gCellStageEndHooks = AttachCellStageEndHooks();
         gTimelineHook = AttachHistoryHook();
         gDietHistoryHook = AttachDietHistoryHook();
         gKillCellOriginal=reinterpret_cast<KillCellFunction>(VerifiedMotionCode(CoopEngine::kKillCellRva,
@@ -3791,12 +3805,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (gEditorUIMessageOriginal)
             gEditorUIHookAttached=DetourAttach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook)==NO_ERROR;
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        if (CommitDetours() != NO_ERROR) { gKillCellHook=false; gCellLifecycleHook=false; gBorrowedCampaignHook=false; gEditorSetNameHook=false; gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
+        if (CommitDetours() != NO_ERROR) { gCellStageEndHooks=false; gKillCellHook=false; gCellLifecycleHook=false; gBorrowedCampaignHook=false; gEditorSetNameHook=false; gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
         PrepareDetours(module);
+        if (gCellStageEndHooks) {
+            DetourDetach(reinterpret_cast<PVOID*>(&gLeaveCellStageOriginal),LeaveCellStageHook);
+            DetourDetach(reinterpret_cast<PVOID*>(&gEnterLandEditorOriginal),EnterLandEditorHook);
+        }
         if (gKillCellHook) DetourDetach(reinterpret_cast<PVOID*>(&gKillCellOriginal),KillCellHook);
         if (gCellLifecycleHook) DetourDetach(reinterpret_cast<PVOID*>(&gResetCellWorldOriginal),ResetCellWorldHook);
         if (gBorrowedCampaignHook) DetourDetach(reinterpret_cast<PVOID*>(&gGalaxySavedWorldsOriginal),GalaxySavedWorldsHook);

@@ -103,6 +103,7 @@ namespace CoopNet
         std::uint64_t worldGeneration = 0;
         // The host alone controls the shared simulation pause.
         bool hostPaused = false;
+        bool cellStageComplete = false;
 
         bool progressInitialized = false;
         std::uint64_t progressAckSequence = 0;
@@ -142,6 +143,7 @@ namespace CoopNet
     void SubmitDietEvent(std::uint32_t eventID);
     std::vector<std::uint32_t> TakeDietEvents(std::uint64_t appliedRevision);
     void SubmitWorldLeave(std::uint64_t world);
+    void SubmitCellStageComplete(std::uint64_t world);
     std::uint64_t SubmitWorldAction(WorldAction action);
     std::vector<WorldAction> TakeWorldActions();
     void SeedProgress(const CellProgress& progress, const std::string& speciesName = {});

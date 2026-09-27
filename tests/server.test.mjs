@@ -16,7 +16,10 @@ const fingerprint = 'a'.repeat(64);
 const sockets = new Set();
 let server, port, logs = '';
 let checks = 0;
-const check = (condition, message) => { assert.ok(condition, message); checks++; };
+const check = (condition, message) => {
+  assert.ok(condition, message); checks++;
+  if (process.env.SPORE_COOP_TEST_TRACE) console.log(checks + ': ' + message);
+};
 
 async function start() {
   const allocator = net.createServer();
@@ -109,7 +112,7 @@ async function client() {
 
 async function hello(role, token = role === 'host' ? hostToken : guestToken, fp = fingerprint) {
   const c = await client();
-  const reply = await c.request({ type: 'hello', protocol: 9, role, token, fingerprint: fp },
+  const reply = await c.request({ type: 'hello', protocol: 10, role, token, fingerprint: fp },
     m => m.type === 'welcome' || m.type === 'error');
   return { c, reply };
 }
@@ -392,14 +395,15 @@ try {
   const shared = await guest.wait(stateMessage(state.revision));
   check(state.dna === 30 && shared.dna === 30 && state.species === species && shared.species === species, 'Single DNA charge and identical genome');
   await failure(host, { type: 'applyEdit', revision: state.revision, eventId: 'edit-1', cost: 20 }, 'Duplicate');
-  await failure(host, { type: 'finishEvolution', revision: state.revision, stage: 'creature' }, 'Both players');
+  await failure(host, { type: 'finishEvolution', revision: state.revision, stage: 'cell' }, 'Both players');
   await guest.request({ type: 'ready', revision: state.revision }, m => m.type === 'state' && m.ready.includes('guest'));
   await host.request({ type: 'ready', revision: state.revision }, m => m.type === 'state' && m.ready.includes('host') && m.ready.includes('guest'));
-  state = await host.request({ type: 'finishEvolution', revision: state.revision, stage: 'creature' }, stateMessage(state.revision + 1));
+  await failure(host, { type: 'finishEvolution', revision: state.revision, stage: 'creature' }, 'only the Cell stage');
+  state = await host.request({ type: 'finishEvolution', revision: state.revision, stage: 'cell' }, stateMessage(state.revision + 1));
   const final = await guest.wait(stateMessage(state.revision));
-  check(state.stage === 'creature' && final.stage === 'creature' && !state.evolving && !final.evolving, 'Both finish evolution');
+  check(state.stage === 'cell' && final.stage === 'cell' && !state.evolving && !final.evolving, 'Both finish body evolution within the supported Cell stage');
   const saved = JSON.parse(await readFile(save, 'utf8'));
-  check(saved.Dna === 30 && saved.Species === species && saved.Stage === 'creature', 'Persistent protocol state');
+  check(saved.Dna === 30 && saved.Species === species && saved.Stage === 'cell', 'Persistent protocol state');
   check(saved.ProgressInitialized && saved.FoodProgression === 14 &&
     saved.EvolutionPointsSpent === 2 && saved.CellUnlocks[2] === 2 && saved.CellUnlocks[7] === 1,
     'Shared cell progress and unlocked parts are persisted');
@@ -440,7 +444,7 @@ try {
   await start();
   const { c: restored } = await hello('host');
   const loaded = await restored.wait(m => m.type === 'state');
-  check(loaded.species === species && loaded.dna === 30 && loaded.stage === 'creature', 'Server restart restores protocol save');
+  check(loaded.species === species && loaded.dna === 30 && loaded.stage === 'cell', 'Server restart restores protocol save');
   check(loaded.speciesName===sharedName, 'Server restart preserves the accepted species name');
   check(loaded.progressInitialized && loaded.progress.food === 14 &&
     loaded.progress.spent === 2 && loaded.progress.unlocks[7] === 1,
@@ -513,13 +517,27 @@ try {
   await failure(connected.host,{...diet,sequence:3,worldGeneration:state.worldGeneration-1},'world generation');
   await failure(connected.host,{...diet,sequence:3,eventID:123},'diet event');
   await failure(connected.guest,{...diet,sequence:3},'Invited player');
+  const complete={type:'cellStageComplete',worldGeneration:state.worldGeneration};
+  await failure(connected.host,complete,'not complete');
+  state=await connected.host.request({...gain('final-cell-food',3),sequence:2,food:989},stateMessage(state.revision+1));
+  check(state.food===1000 && !state.cellStageComplete,'Full food alone still permits the final History');
+  await failure(connected.host,{...complete,worldGeneration:state.worldGeneration-1},'world generation');
+  state=await connected.host.request(complete,stateMessage(state.revision+1));
+  const peerComplete=await connected.guest.wait(stateMessage(state.revision));
+  check(state.cellStageComplete && peerComplete.cellStageComplete && state.stage==='cell',
+    'Invited player finishing History ends the first stage for both windows without advancing the campaign');
+  const repeatedComplete=await connected.host.request(complete,stateMessage(state.revision));
+  check(repeatedComplete.cellStageComplete && repeatedComplete.revision===state.revision,'Duplicate completion is idempotent');
+  await failure(connected.guest,{type:'editorOpen',editorId:42,editorBudget:0,species:'',speciesName:''},'Version 1 ends');
   await failure(connected.host,{type:'worldLeave',worldGeneration:state.worldGeneration},'World owner');
   await failure(connected.guest,{type:'worldLeave',worldGeneration:state.worldGeneration-1},'world generation');
   connected.guest.send({type:'worldLeave',worldGeneration:state.worldGeneration});
   check((await connected.host.wait(m=>m.type==='sessionEnded')).reason==='host_left', 'Owner return to menu ends the invited game without TCP exit');
   check((await connected.guest.wait(m=>m.type==='sessionEnded')).reason==='host_left', 'Owner also stops the completed session');
-  const ended=await connected.guest.wait(m=>m.type==='state' && !m.inviteAccepted);
+  const ended=await connected.guest.wait(m=>m.type==='state' && m.revision>state.revision && !m.inviteAccepted);
   check(!ended.evolving && !ended.hostPaused && !ended.inviteFrom,'World exit releases shared editor and pause');
+  const nextInvite=await connected.guest.request({type:'invite'},stateMessage(ended.revision+1));
+  check(!nextInvite.cellStageComplete && nextInvite.stage==='cell','Another invitation does not inherit the previous ending screen');
   console.log('PASS: ' + checks + ' protocol assertions. No gameplay was tested. Artifacts: ' + temp);
 } catch (error) {
   console.error('Failed after ' + checks + ' assertions. Server log:\n' + logs);

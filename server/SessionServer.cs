@@ -65,6 +65,7 @@ namespace SporeCoop
         public bool InviteAccepted;
         public string InviteFrom;
         public bool HostPaused;
+        public bool CellStageComplete;
         public long WorldGeneration;
     }
 
@@ -80,7 +81,7 @@ namespace SporeCoop
     {
         const int MaxFrame = 1048576;
         const int MaxSpeciesBytes = 262144;
-        const int Protocol = 9;
+        const int Protocol = 10;
         readonly object Gate = new object();
         readonly Dictionary<string, Peer> Peers = new Dictionary<string, Peer>();
         readonly HashSet<string> Ready = new HashSet<string>();
@@ -142,6 +143,7 @@ namespace SporeCoop
             loaded.InviteAccepted = false;
             loaded.InviteFrom = null;
             loaded.HostPaused = false;
+            loaded.CellStageComplete = false;
             return loaded;
         }
 
@@ -166,6 +168,7 @@ namespace SporeCoop
                 inviteFrom = State.InviteFrom,
                 worldGeneration = State.WorldGeneration,
                 hostPaused = State.HostPaused,
+                cellStageComplete = State.CellStageComplete,
                 editor = State.Editor, editorId = State.EditorID,
                 speciesSequence = State.SpeciesSequence,
                 editorBudget = State.EditorBudget, speciesName = State.SpeciesName,
@@ -581,6 +584,8 @@ namespace SporeCoop
                 State.InviteAccepted = false;
                 State.InviteFrom = peer.Role;
                 ++State.WorldGeneration;
+                State.CellStageComplete = false;
+                State.Stage = "cell";
                 WorldObjects.Clear(); RemovedObjects.Clear();
                 HistorySequence=0;
                 State.HostPaused = false;
@@ -711,6 +716,18 @@ namespace SporeCoop
                         sequence=sequence,eventID=eventID,revision=State.Revision });
                 return;
             }
+            if (type == "cellStageComplete")
+            {
+                if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
+                if (Integer(data,"worldGeneration",1,long.MaxValue)!=State.WorldGeneration)
+                    throw new ArgumentException("Wrong world generation");
+                if (!State.ProgressInitialized || State.FoodProgression<1000 || State.Evolving)
+                    throw new ArgumentException("Cell stage is not complete");
+                if (State.CellStageComplete) { Send(peer,Snapshot()); return; }
+                State.CellStageComplete=true;
+                Changed();
+                return;
+            }
             if (type == "worldLeave")
             {
                 if (!State.InviteAccepted || peer.Role!=State.InviteFrom)
@@ -730,6 +747,7 @@ namespace SporeCoop
             if (type == "editorOpen")
             {
                 if (!State.InviteAccepted) throw new ArgumentException("Invitation must be accepted");
+                if (State.CellStageComplete) throw new ArgumentException("Version 1 ends after the Cell stage");
                 long editorId = Integer(data, "editorId", 0, uint.MaxValue);
                 string initial=data.ContainsKey("species") ? Text(data,"species",350000) : "";
                 int budget=(int)Integer(data,"editorBudget",0,100000000);
@@ -832,6 +850,7 @@ namespace SporeCoop
             }
             if (type == "beginEvolution")
             {
+                if (State.CellStageComplete) throw new ArgumentException("Version 1 ends after the Cell stage");
                 HostOnly(peer);
                 Version(data);
                 string owner = Text(data, "owner", 5);
@@ -911,8 +930,9 @@ namespace SporeCoop
                 HostOnly(peer);
                 Version(data);
                 string stage = Text(data, "stage", 8);
+                if (stage != "cell") throw new ArgumentException("Version 1 supports only the Cell stage");
                 if (!State.Evolving || Peers.Count != 2 || Ready.Count != 2 || Pending != null ||
-                    (stage != State.Stage && !(State.Stage == "cell" && stage == "creature")))
+                    stage != State.Stage)
                     throw new ArgumentException("Both players must be ready; stage transition refused");
                 State.Stage = stage;
                 State.Evolving = false;
@@ -1125,7 +1145,7 @@ namespace SporeCoop
                 if (hostToken.Length < 24 || hostToken.Length > 128 || guestToken.Length < 24 ||
                     guestToken.Length > 128 || hostToken == guestToken) throw new ArgumentException("Use distinct tokens of 24-128 characters");
                 string save = options.TryGetValue("--save", out value) ? value : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "session.json");
-                Console.WriteLine("SporeCoop protocol prototype. Gameplay adapter is not implemented.");
+                Console.WriteLine("SporeCoop Version 1 server (protocol 10). Supported stage: Cell.");
                 Console.WriteLine("HOST TOKEN (keep local): " + hostToken);
                 Console.WriteLine("GUEST TOKEN (share with friend): " + guestToken);
                 new Server(address, port, hostToken, guestToken, save).Run();

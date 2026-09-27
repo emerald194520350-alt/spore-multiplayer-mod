@@ -5,6 +5,7 @@
 #include "../native/ProgressSync.h"
 #include "../native/CellEngineAbi.h"
 #include "../native/UiGraphicsAbi.h"
+#include "../native/CellStageEndState.h"
 #include <stdexcept>
 #include <iostream>
 #include "engine-motion.test.h"
@@ -412,6 +413,22 @@ int main(int argc, char** argv)
         const auto closing=gOutgoing.back();
         Check(closing.find(R"("editorSession":8)")!=std::string::npos && closing.find(R"("editorFinished":true)")!=std::string::npos,
             "Native finish packet includes its session and explicit acceptance");
+        HandleMessage(R"({"type":"state","worldGeneration":51,"cellStageComplete":true})");
+        Check(gSnapshot.cellStageComplete,"First-stage completion reaches the native client");
+        CoopNet::SubmitCellStageComplete(51);
+        Check(gOutgoing.back()==R"({"type":"cellStageComplete","worldGeneration":51})","Completion request binds to the current world");
+        HandleMessage(R"({"type":"state","worldGeneration":52,"cellStageComplete":false})");
+        Check(!gSnapshot.cellStageComplete,"A new world clears the old completion");
+        CoopSession::CellStageEndState ending;
+        Check(!ending.Observe(1,false,true,false),"Ordinary History closure cannot end the game");
+        Check(!ending.Observe(1,true,true,true),"Peer completion waits for the local History to close");
+        Check(ending.Observe(1,true,true,false),"Closing the final History shows the ending");
+        Check(ending.Observe(0,false,false,false),"Owner exit and connection loss do not erase an already shown ending");
+        ending.Dismiss();
+        Check(!ending.Observe(1,true,true,false),"An acknowledged ending does not reopen from repeated snapshots");
+        Check(!ending.Observe(2,false,true,false),"A new invitation starts normally");
+        ending.Request(2);
+        Check(ending.Observe(2,false,true,false),"Local stage transition remains blocked while server acknowledgement is in flight");
         gSnapshot.sessionEnded = false;
         gSnapshot.connected = gSnapshot.inviteAccepted = true;
         HandleMessage("{\"type\":\"sessionEnded\",\"reason\":\"host_left\"}");

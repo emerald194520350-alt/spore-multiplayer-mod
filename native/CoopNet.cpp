@@ -21,7 +21,7 @@
 namespace
 {
     constexpr int kMaxFrame = 1024 * 1024;
-    constexpr int kProtocol = 9;
+    constexpr int kProtocol = 10;
     constexpr const char* kFingerprint =
         "3d81f0d5819a6b2f20260916c011a1b54a55a7a94c5cb596d56f1412cc17e220";
 
@@ -339,6 +339,7 @@ namespace
             gSnapshot.inviteFrom.clear();
             gSnapshot.worldGeneration = 0;
             gSnapshot.hostPaused = false;
+            gSnapshot.cellStageComplete = false;
             gSnapshot.progressInitialized = false;
             gSnapshot.progressAckSequence = 0;
             gSnapshot.revision = 0;
@@ -582,6 +583,8 @@ namespace
             ReadBool(json, "inviteAccepted", inviteAccepted);
             bool hostPaused = false;
             ReadBool(json, "hostPaused", hostPaused);
+            bool cellStageComplete = false;
+            ReadBool(json, "cellStageComplete", cellStageComplete);
             std::string inviteFrom;
             ReadString(json, "inviteFrom", inviteFrom);
             std::uint64_t worldGeneration = 0;
@@ -641,6 +644,7 @@ namespace
             gSnapshot.inviteFrom = inviteFrom;
             gSnapshot.worldGeneration = worldGeneration;
             gSnapshot.hostPaused = hostPaused;
+            gSnapshot.cellStageComplete = cellStageComplete;
             gSnapshot.editorRole = editorRole;
             gSnapshot.editorID = editorID;
             if (speciesSequence >= gSnapshot.speciesSequence)
@@ -1031,6 +1035,11 @@ namespace CoopNet
     void SubmitWorldLeave(std::uint64_t world)
     {
         Queue("{\"type\":\"worldLeave\",\"worldGeneration\":"+std::to_string(world)+"}");
+    }
+
+    void SubmitCellStageComplete(std::uint64_t world)
+    {
+        Queue("{\"type\":\"cellStageComplete\",\"worldGeneration\":"+std::to_string(world)+"}");
     }
 
     void SubmitNpcSnapshot(const std::vector<NpcState>& npcs, std::uint64_t actionAck)

@@ -5,7 +5,7 @@
 
 namespace CoopUi
 {
-    enum class Style { Primary, Secondary, Label, Panel };
+    enum class Style { Primary, Secondary, Label, Panel, Blackout };
 
     inline void RoundedFill(UTFWin::Graphics2D& graphics, const Math::Rectangle& r,
         float radius, uint32_t color)
@@ -55,6 +55,12 @@ namespace CoopUi
             if (!renderer || mStyle == Style::Label) return;
             auto& graphics = renderer->GetGraphics2D();
             const Math::Color oldColor(ReadGraphicsColor(graphics));
+            if (mStyle==Style::Blackout) {
+                graphics.SetColor(Math::Color(0xFF000000));
+                graphics.FillRectangle(area.x1,area.y1,area.x2,area.y2);
+                graphics.SetColor(oldColor);
+                return;
+            }
             const bool enabled = (params.state & UTFWin::kStateEnabled) != 0;
             const bool hover = (params.state & UTFWin::kStateHover) != 0;
             const bool down = (params.state & UTFWin::kStateClicked) != 0;
