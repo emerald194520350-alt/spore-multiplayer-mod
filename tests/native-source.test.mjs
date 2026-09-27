@@ -8,6 +8,7 @@ const project = dirname(dirname(fileURLToPath(import.meta.url)));
 const probe = await readFile(join(project, 'native', 'Probe.cpp'), 'utf8');
 const net = await readFile(join(project, 'native', 'CoopNet.cpp'), 'utf8');
 const ui = await readFile(join(project, 'native', 'CoopUi.h'), 'utf8');
+const ending = await readFile(join(project, 'native', 'CellStageEnd.h'), 'utf8');
 
 assert.doesNotMatch(ui, /graphics\.GetColor\(/,
   'SDK Graphics2D::GetColor has an incompatible structure-return ABI and corrupts the paint stack');
@@ -30,6 +31,21 @@ assert.match(submitAppearance,/gSavedEditorAppearance\.Canonical\(snapshot,speci
   'The mirrored saver must publish the same final body, including when the guest initiated completion');
 const applyRemoteAppearance = body(probe, 'void ApplyRemoteAppearance(', 'void UpdateRemoteCell(');
 const coopUpdate = body(probe, 'void CoopUpdate()', 'void Spawn()');
+assert.match(coopUpdate, /if \(UpdateCellStageEnd\(snapshot\)\) return;\s*if \(UpdateWorldLifecycle\(snapshot\)\) return;/,
+  'Final History and ending must take precedence over the normal owner-left exit');
+const updateEnding = body(ending, 'bool UpdateCellStageEnd(', 'bool AttachCellStageEndHooks(');
+const worldActions = body(probe, 'void ApplyWorldActions()', 'using UnregisterCollisionFunction');
+const worldRemoval = body(probe, 'void __cdecl WorldRemoveHook(', 'void ApplyWorldActions()');
+assert.match(worldActions, /CoopEngine::GuestLootScope guestLoot\(true\)/,
+  'Authoritative guest death and breakup must retain part drops outside the owner camera');
+assert.match(worldActions, /gGuestLootCells\.insert\(cell->Index\(\)\);[\s\S]*gKillCellOriginal/,
+  'Guest kill provenance must survive until the later native corpse-removal callback');
+assert.match(worldRemoval, /GuestLootScope guestLoot\(gGuestLootCells\.erase\(index\)!=0\)/,
+  'Delayed corpse removal consumes the guest loot context exactly once');
+assert.match(updateEnding, /\(state\.inviteAccepted \|\| state\.sessionEnded\) && state\.cellStageComplete/,
+  'TCP teardown must not discard completion before the game thread observes it');
+assert.match(updateEnding, /gCellStageEnd\.Observe\([\s\S]*if \(!gCellStageEnd\.visible\) return true;[\s\S]*MessageManager\.MessageSend[\s\S]*LayoutCellStageEnd\(\)/,
+  'Waiting for final History must block ordinary exit without saving or covering the still-open History');
 const inviteUI = body(probe, 'void UpdateInviteUI(', 'void UpdatePeerIndicator(');
 const validateSavedWorld = body(probe, 'bool ValidateIncomingSavedWorld(', 'bool FindNewestSavedGame(');
 const sharedEditor = body(probe, 'void UpdateSharedEditor(', 'constexpr uint32_t kInviteButtonID');

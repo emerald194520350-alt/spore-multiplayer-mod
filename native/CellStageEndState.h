@@ -15,7 +15,9 @@ struct CellStageEndState {
         }
         if (inCell && completed && !dismissed) requested=true;
         if (requested && inCell && !historyVisible) visible=true;
-        return visible;
+        // Own the update while waiting, too: the normal guest-exit path would
+        // otherwise unload the world and close History when its owner leaves.
+        return visible || (requested && inCell && historyVisible);
     }
     void Dismiss() {
         requested=visible=menuRequested=false; dismissed=true;

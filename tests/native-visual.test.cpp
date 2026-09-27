@@ -421,7 +421,10 @@ int main(int argc, char** argv)
         Check(!gSnapshot.cellStageComplete,"A new world clears the old completion");
         CoopSession::CellStageEndState ending;
         Check(!ending.Observe(1,false,true,false),"Ordinary History closure cannot end the game");
-        Check(!ending.Observe(1,true,true,true),"Peer completion waits for the local History to close");
+        Check(ending.Observe(1,true,true,true) && !ending.visible,
+            "Pending completion owns the update without covering the open History");
+        Check(ending.Observe(1,false,true,true) && !ending.visible,
+            "Owner departure cannot run ordinary guest exit while the final History is open");
         Check(ending.Observe(1,true,true,false),"Closing the final History shows the ending");
         Check(ending.Observe(0,false,false,false),"Owner exit and connection loss do not erase an already shown ending");
         ending.Dismiss();
@@ -429,6 +432,16 @@ int main(int argc, char** argv)
         Check(!ending.Observe(2,false,true,false),"A new invitation starts normally");
         ending.Request(2);
         Check(ending.Observe(2,false,true,false),"Local stage transition remains blocked while server acknowledgement is in flight");
+        CoopSession::CellStageEndState ordinaryHistory;
+        Check(!ordinaryHistory.Observe(2,false,true,true),
+            "Owner departure during ordinary History must still reach the normal guest exit");
+        CoopSession::CellStageEndState interruptedEnding;
+        interruptedEnding.Request(2);
+        Check(!interruptedEnding.Observe(2,false,false,true),
+            "Pending ending must not hold an unrelated game mode");
+        Check(!interruptedEnding.Observe(3,false,true,true) && !interruptedEnding.requested,
+            "A new world cannot inherit an unfinished wait for History");
+        HandleMessage(R"({"type":"state","worldGeneration":53,"cellStageComplete":true,"inviteAccepted":true,"inviteFrom":"host"})");
         gSnapshot.sessionEnded = false;
         gSnapshot.connected = gSnapshot.inviteAccepted = true;
         HandleMessage("{\"type\":\"sessionEnded\",\"reason\":\"host_left\"}");
@@ -436,6 +449,13 @@ int main(int argc, char** argv)
         Check(gSnapshot.sessionEnded && gSnapshot.disconnectReason == "host_left" &&
             !gSnapshot.connected && !gSnapshot.inviteAccepted,
             "TCP teardown preserves the host-left reason and clears active session state");
+        Check(gSnapshot.cellStageComplete && gSnapshot.worldGeneration==53,
+            "TCP teardown retains the final completion even before the game thread observes it");
+        CoopSession::CellStageEndState lateEnding;
+        Check(lateEnding.Observe(gSnapshot.worldGeneration,gSnapshot.cellStageComplete,true,true) && !lateEnding.visible,
+            "Completion first observed after owner exit still waits for the open History");
+        Check(lateEnding.Observe(gSnapshot.worldGeneration,gSnapshot.cellStageComplete,true,false) && lateEnding.visible,
+            "Closing History after owner exit still reaches the ending screen");
         std::cout << "PASS: " << checks << " native visual/network assertions. No gameplay was tested.\n";
         return 0;
     }

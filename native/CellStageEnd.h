@@ -73,7 +73,7 @@ void LayoutCellStageEnd()
     gCellStageEndTitle->SetCaption(CoopText(u"The first stage is complete!",u"\u041f\u0435\u0440\u0432\u044b\u0439 \u044d\u0442\u0430\u043f \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d!"));
     gCellStageEndDetail->SetCaption(CoopText(u"The remaining stages are coming soon",u"\u041e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u044d\u0442\u0430\u043f\u044b \u0441\u043a\u043e\u0440\u043e \u043f\u043e\u044f\u0432\u044f\u0442\u0441\u044f"));
     gCellStageEndSteam->SetCaption(CoopText(u"in the mod for SPORE on Steam.",u"\u0432 \u043c\u043e\u0434\u0435 \u0434\u043b\u044f SPORE \u0432 Steam."));
-    gCellStageEndVersion->SetCaption(CoopText(u"Version 1 \u2014 Cell Stage",u"Version 1 \u2014 \u044d\u0442\u0430\u043f \u00ab\u041a\u043b\u0435\u0442\u043a\u0430\u00bb"));
+    gCellStageEndVersion->SetCaption(CoopText(u"Version 1.0.1 \u2014 Cell Stage",u"Version 1.0.1 \u2014 \u044d\u0442\u0430\u043f \u00ab\u041a\u043b\u0435\u0442\u043a\u0430\u00bb"));
     gCellStageEndMenu->SetCaption(CoopText(u"Main menu",u"\u0412 \u0433\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e"));
     for (auto window:{gCellStageEndBlack.get(),gCellStageEndTitle.get(),gCellStageEndDetail.get(),
         gCellStageEndSteam.get(),gCellStageEndVersion.get(),gCellStageEndMenu.get()}) {
@@ -93,8 +93,11 @@ bool UpdateCellStageEnd(const CoopNet::Snapshot& state)
         return true;
     }
     const bool wasVisible=gCellStageEnd.visible;
-    if (!gCellStageEnd.Observe(state.worldGeneration,state.inviteAccepted && state.cellStageComplete,
+    // TCP teardown can clear the invitation before the game thread sees the
+    // last completed snapshot. Its completion still belongs to this world.
+    if (!gCellStageEnd.Observe(state.worldGeneration,(state.inviteAccepted || state.sessionEnded) && state.cellStageComplete,
         Simulator::IsCellGame(),gTimelineVisible)) return false;
+    if (!gCellStageEnd.visible) return true; // Let the player finish reading History.
     if (!wasVisible) {
         // Completion and its final food snapshot may arrive between gameplay
         // updates. Save the completed progress, never the previous frame's food.

@@ -27,6 +27,7 @@
 #include "CellMotionAbi.h"
 #include "CellBodyAbi.h"
 #include "CellLifecycleAbi.h"
+#include "CellLootAbi.h"
 #include "CellStageEndAbi.h"
 #include "CellStageEndState.h"
 #include "CellReplicaAbi.h"
@@ -488,6 +489,8 @@ namespace
     using KillCellFunction=bool(__cdecl*)(Simulator::Cell::cCellObjectData*,int,void*,bool,bool,float);
     KillCellFunction gKillCellOriginal=nullptr;
     bool gKillCellHook=false;
+    bool gPartLootHook=false;
+    std::set<int> gGuestLootCells;
 
     bool __cdecl KillCellHook(Simulator::Cell::cCellObjectData* cell,int attacker,void* resource,
         bool credit,bool extra,float delta)
@@ -531,6 +534,9 @@ namespace
 
     void __cdecl WorldRemoveHook(Simulator::cObjectPoolIndex index, bool effects, float size, bool immediate)
     {
+        // Native death animation can finish later, outside ApplyWorldActions.
+        // Keep the guest's part-drop eligibility until the corpse is removed.
+        CoopEngine::GuestLootScope guestLoot(gGuestLootCells.erase(index)!=0);
         auto snapshot=CoopNet::GetSnapshot();
         if (!gResettingCellWorld && snapshot.connected && snapshot.inviteAccepted && !snapshot.editorOpen &&
             !CoopSession::IsWorldOwner(snapshot,CoopNet::GetRole()) &&
@@ -579,6 +585,7 @@ namespace
             if (cell && cell->Index()!=game->mAvatarCellIndex && cell->Index()!=gRemoteCellIndex &&
                 cell->mCellResource && cell->mCellResource->mInstanceID==action.resource)
             {
+                CoopEngine::GuestLootScope guestLoot(true);
                 if (action.removed) {
                     // Native corpse breakup E7ADD0 emits the three meat pieces.
                     // Plain deletion, and E7A4A0's earlier death phase, do not.
@@ -590,13 +597,16 @@ namespace
                         burst(cell->Index(),false,0.0f);
                         WriteProbeLog("Owner replayed guest corpse breakup with native meat loot.");
                     } else gWorldRemoveOriginal(cell->Index(),action.effects,0.0f,false);
+                    gGuestLootCells.erase(static_cast<int>(action.id));
                 } else if (action.damage && !cell->field_112 && !cell->field_113) {
                     cell->mHealthPoints=std::max(0,cell->mHealthPoints-action.damage);
                     if (!cell->mHealthPoints && gKillCellOriginal) {
                         auto attacker=game->mCells.GetIfNotDeleted(gRemoteCellIndex);
+                        gGuestLootCells.insert(cell->Index());
                         // Kill credit is already in the invited player's progress delta.
-                        gKillCellOriginal(cell,attacker ? attacker->Index() : -1,
-                            attacker ? attacker->mCellResource : nullptr,false,false,0.0f);
+                        if (!gKillCellOriginal(cell,attacker ? attacker->Index() : -1,
+                            attacker ? attacker->mCellResource : nullptr,false,false,0.0f))
+                            gGuestLootCells.erase(cell->Index());
                         WriteProbeLog("Owner replayed guest NPC kill through native death/loot.");
                     }
                 }
@@ -3349,6 +3359,7 @@ namespace
             gLastLocalName.clear(); gPendingName.clear(); gLastEditorName.clear();
             gObservedWorldGeneration = snapshot.worldGeneration;
             gWorldActionApplied = 0;
+            gGuestLootCells.clear();
             gProgressSync.Reset();
             gAppliedSpeciesSequence=0; gPendingSpeciesSequence=0; gPendingSpecies.clear();
             gEditorInitialModelPending = false;
@@ -3718,7 +3729,7 @@ namespace
             ? "Verified native replica collision isolation; synthetic cells keep death flag clear."
             : "Unsupported collision isolation ABI; network cell creation is disabled.");
         WriteProbeLog(gCellGrowthHookAttached && gWorldRemovalHookAttached
-            ? "Version 1 / protocol 10: verified world-growth coordinates and shared object interactions enabled."
+            ? "Version 1.0.1 / protocol 10: verified world-growth coordinates and shared object interactions enabled."
             : "World growth/removal hook unavailable; shared world adapter cannot run.");
         WriteProbeLog(GetCellProgressFunctions().Ready()
             ? "Verified native shared growth, part/quest notifications, cinematic and campaign editor entry."
@@ -3737,6 +3748,8 @@ namespace
             : "Native food history relay unavailable.");
         WriteProbeLog(gKillCellHook && gCellLifecycleHook ? "Verified cooperative NPC death/loot and avatar-only respawn."
             : "Cooperative death/respawn hooks unavailable.");
+        WriteProbeLog(gPartLootHook ? "Version 1.0.1: verified guest part drops outside the owner's camera."
+            : "Native guest part-drop visibility hook unavailable.");
         WriteProbeLog(gEditorSetNameHook ? "Verified campaign editor name override correction."
             : "Campaign editor name override hook unavailable.");
         WriteProbeLog(gCellStageEndHooks ? "Version 1: verified Cell-stage ending after History; further stages disabled in co-op."
@@ -3758,6 +3771,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         gCellStageEndHooks = AttachCellStageEndHooks();
         gTimelineHook = AttachHistoryHook();
         gDietHistoryHook = AttachDietHistoryHook();
+        if (auto loot=static_cast<unsigned char*>(VerifiedMotionCode(CoopEngine::kSpawnLootRva,
+            CoopEngine::kSpawnLootSize,CoopEngine::kSpawnLootHash,CoopEngine::kSpawnLootRelocations))) {
+            CoopEngine::gPartLootVisibilityOriginal=loot+CoopEngine::kPartLootOutsideViewOffset;
+            CoopEngine::gPartLootEligible=loot+CoopEngine::kPartLootEligibleOffset;
+            gPartLootHook=DetourAttach(&CoopEngine::gPartLootVisibilityOriginal,CoopEngine::PartLootVisibilityHook)==NO_ERROR;
+        }
         gKillCellOriginal=reinterpret_cast<KillCellFunction>(VerifiedMotionCode(CoopEngine::kKillCellRva,
             CoopEngine::kKillCellSize,CoopEngine::kKillCellHash,CoopEngine::kKillCellRelocations));
         if (gKillCellOriginal) gKillCellHook=DetourAttach(reinterpret_cast<PVOID*>(&gKillCellOriginal),KillCellHook)==NO_ERROR;
@@ -3805,7 +3824,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         if (gEditorUIMessageOriginal)
             gEditorUIHookAttached=DetourAttach(reinterpret_cast<PVOID*>(&gEditorUIMessageOriginal),EditorUIMessageHook)==NO_ERROR;
         ProfilePathsDetour::attach(GetAddress(App::cAppSystem, SetUserDirNames));
-        if (CommitDetours() != NO_ERROR) { gCellStageEndHooks=false; gKillCellHook=false; gCellLifecycleHook=false; gBorrowedCampaignHook=false; gEditorSetNameHook=false; gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
+        if (CommitDetours() != NO_ERROR) { gPartLootHook=false; gCellStageEndHooks=false; gKillCellHook=false; gCellLifecycleHook=false; gBorrowedCampaignHook=false; gEditorSetNameHook=false; gModelAttachmentsHook=false; gTimelineHook=false; gDietHistoryHook=false; gCampaignSaveHooks=false; gCellGraphicsHookAttached = false; gCellGrowthHookAttached = false; gWorldRemovalHookAttached = false; gEditorUIHookAttached=false; }
         ModAPI::AddPostInitFunction(Initialize);
     }
     else if (reason == DLL_PROCESS_DETACH)
@@ -3816,6 +3835,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
             DetourDetach(reinterpret_cast<PVOID*>(&gEnterLandEditorOriginal),EnterLandEditorHook);
         }
         if (gKillCellHook) DetourDetach(reinterpret_cast<PVOID*>(&gKillCellOriginal),KillCellHook);
+        if (gPartLootHook) DetourDetach(&CoopEngine::gPartLootVisibilityOriginal,CoopEngine::PartLootVisibilityHook);
         if (gCellLifecycleHook) DetourDetach(reinterpret_cast<PVOID*>(&gResetCellWorldOriginal),ResetCellWorldHook);
         if (gBorrowedCampaignHook) DetourDetach(reinterpret_cast<PVOID*>(&gGalaxySavedWorldsOriginal),GalaxySavedWorldsHook);
         if (gEditorSetNameHook) DetourDetach(reinterpret_cast<PVOID*>(&gEditorSetNameOriginal),EditorSetNameHook);
