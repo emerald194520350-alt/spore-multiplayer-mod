@@ -2,13 +2,23 @@
 #pragma once
 #include "CellMotionAbi.h"
 namespace CoopEngine {
+// Native corpse breakup: emits the default meat loot then removes the corpse.
+constexpr std::uintptr_t kBurstCellRva=0xa7add0;
+constexpr std::size_t kBurstCellSize=0x105;
+constexpr std::uint32_t kBurstCellHash=0x9b6967fd;
+constexpr std::size_t kBurstCellRelocations[]={0x2,0xb9};
+constexpr std::uintptr_t kFinishCinematicRva=0xa7f550;
+constexpr std::size_t kFinishCinematicSize=0x4a;
+constexpr std::uint32_t kFinishCinematicHash=0x57be91ff;
+constexpr std::size_t kFinishCinematicRelocations[]={0x1,0x18};
 // Steam March 2017: cdecl(cell*, attacker index, attacker resource*, credit,
-// extra death flag, delta). This starts death AND emits the native loot.
+// extra death flag, delta). Starts death and optional resource-specific loot;
+// the standard meat table belongs to the later BurstCell phase above.
 constexpr std::uintptr_t kKillCellRva=0xa7a4a0;
 constexpr std::size_t kKillCellSize=0x2c2;
 constexpr std::uint32_t kKillCellHash=0x08d09f1d;
 constexpr std::size_t kKillCellRelocations[]={0x21,0x8e,0xb2,0xb9,0xe7,0x11d,0x19a,0x1bd,0x1e3,0x1f6,0x241,0x24a,0x253,0x25c,0x265,0x26e,0x277,0x280,0x289,0x292};
-// cdecl(position*, scale): creates only the local avatar, keeping the world pool.
+// cdecl(position*, worldSizeFactor): creates only the avatar, keeping the world pool.
 constexpr std::uintptr_t kSpawnAvatarRva=0xa750c0;
 constexpr std::size_t kSpawnAvatarSize=0x28f;
 constexpr std::uint32_t kSpawnAvatarHash=0xbf904212;

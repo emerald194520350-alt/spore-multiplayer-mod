@@ -27,6 +27,17 @@ inline bool TestSharedWorld()
         require(std::abs(result.x-g.x)<1e-8 && std::abs(result.y-g.y)<1e-8,"Repeated growth must not drift players");
     }
     require(!guest.Rebase(g,g,0),"Invalid growth rejected");
+    // Join after many owner growth steps, with a newly loaded local frame.
+    CoopWorld::Coordinates joined;
+    require(joined.Anchor({0,0,0},{20000,-40000,0},150),"Late join anchors at the owner's current network scale");
+    const auto ownerLocal=joined.Decode({20000,-40000,0});
+    const auto adjacent=joined.Encode({8,0,0});
+    require(std::abs(ownerLocal.x)<1e-8 && std::abs(ownerLocal.y)<1e-8 &&
+        std::abs(adjacent.x-21200)<1e-8,"Late join remains beside owner instead of flying toward old spawn");
+    require(joined.Rebase({8,0,0},{0,0,0},2),"Post-join growth retains the new anchor");
+    require(std::abs(joined.Encode({0,0,0}).x-adjacent.x)<1e-8,"Growth after joining does not move the network avatar");
+    const double oldUnit=joined.unit;
+    require(!joined.Anchor({0,0,0},{0,0,0},0) && joined.unit==oldUnit,"Invalid join scale preserves existing coordinates");
     CoopProgress::Reconciler a,b;
     CoopNet::CellProgress seed; seed.missions[1]=3; a.Initialize(seed); b.Initialize(seed);
     auto av=seed,bv=seed; av.missions[1]++; bv.missions[1]+=2;
